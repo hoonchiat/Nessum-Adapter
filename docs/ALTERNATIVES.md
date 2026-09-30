@@ -136,7 +136,34 @@ options. The **option C backend is implemented** in
   when it is verified. A failed verification stays failed.
 
 Operator flow: plug in → **RE-PLUG TO VERIFY** → unplug and re-plug the same unit →
-**VERIFIED** (MAC shown) → write the label → next unit.
+**VERIFIED** (MAC shown) → **print the label** → next unit.
+
+**Label printing** ([`host/tools/labels.py`](../host/tools/labels.py)):
+
+- **Content:** a 50 × 25 mm label (`--label-size`) with title, date, `MAC xx:xx:…`, a
+  **Code 128** barcode of the 12 hex digits, serial and run.
+  - The encoder was cross-checked against the python-barcode library's Code 128
+    tables, and a rendered label decodes correctly with zxing-cpp.
+  - CI keeps golden symbols and a round-trip decoder test.
+- **Printers** (`--printer`):
+  - `browser` (default): prints from the page, to any printer the station PC has; add
+    Chrome's `--kiosk-printing` for no dialog.
+  - `zpl:tcp://HOST[:9100]`: Zebra-compatible thermal printer on the network.
+  - `zpl:/dev/usb/lp0`: USB thermal printer.
+  - `file:DIR`: ZPL + SVG files, for testing.
+  - Use `--dpmm 12` for 300 dpi printers.
+- **Only for units whose MAC may be shown:** the station server refuses to print or
+  preview a label before VERIFIED, or after a failed verification.
+- **Printing:** **Print label** (shortcut `P`) under the VERIFIED tile, with a preview.
+  **Print label automatically** prints once per verified unit.
+- **Traceability:** every print is logged as `label-printed`, and reprints as
+  "reprint n". **Reprint** is in the unit list (with a confirmation). The run panel
+  counts labelled units.
+- **Command line:** `factory_program.py --verify --log … --printer zpl:tcp://…` prints
+  the label right after a successful verification.
+
+![Option C: verified, label printed](images/factory-ui-c-label.png)
+![Sample label (50 × 25 mm)](images/label-sample.png)
 
 ![Option C: programmed, MAC hidden until re-plug](images/factory-ui-c-pass.png)
 ![Option C: wrong unit plugged in while one is waiting](images/factory-ui-c-wrong-unit.png)

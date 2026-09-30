@@ -84,6 +84,14 @@
   td { white-space: nowrap; } td:last-child { white-space: normal; }
   td.retired { text-decoration: line-through; color: var(--muted); }
   td.hidden-mac { color: var(--muted); font-style: italic; font-family: inherit; }
+  .label-box { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin-top: 18px;
+               padding: 14px; border: 1px dashed var(--line); border-radius: 12px; }
+  .label-box img { background: #fff; border: 1px solid #c9ced6; border-radius: 4px; width: 300px; max-width: 100%;
+                   box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+  .label-box .label-actions { display: flex; flex-direction: column; gap: 10px; }
+  .label-status { font-size: 15px; color: var(--muted); }
+  .label-status.done { color: var(--pass); font-weight: 600; }
+  td .mini { padding: 4px 10px; font-size: 13px; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); }
   th { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
   td.st-ok { color: var(--pass); font-weight: 700; } td.st-fail { color: var(--fail); font-weight: 700; }
@@ -102,6 +110,7 @@
   <span class="pill" id="devPill"><span class="dot"></span><span id="devText">No adapter</span></span>
   <span class="pill">Option <span id="backend">—</span></span>
   <span class="pill">Key <span class="mono" id="keyFp">—</span></span>
+  <span class="pill">Printer: <span id="printerName">—</span></span>
   <span class="pill warn" id="nolock" hidden>ENGINEERING MODE: units are NOT locked</span>
   <span id="warns"></span>
 </header>
@@ -135,6 +144,7 @@
         <dt>Block</dt><dd class="mono" id="rBlock"></dd>
         <dt>Failed</dt><dd id="rFailed"></dd>
         <dt>Verify failed</dt><dd id="rVerifyFailed"></dd>
+        <dt>Labelled</dt><dd id="rLabelled"></dd>
         <dt>Spare addresses</dt><dd id="rSpare"></dd>
       </dl>
       <button id="closeRun">Close run</button>
@@ -149,11 +159,20 @@
         <div class="sub" id="tSub">Start or resume a production run on the left.</div>
         <div class="msg" id="tMsg"></div>
       </div>
+      <div class="label-box" id="labelBox" hidden>
+        <img id="labelImg" alt="Label preview">
+        <div class="label-actions">
+          <button class="primary" id="printBtn">Print label <kbd>P</kbd></button>
+          <span class="label-status" id="labelStatus"></span>
+        </div>
+      </div>
       <div class="controls">
         <button class="primary big" id="programBtn" disabled>Program adapter</button>
         <button id="reworkBtn" hidden>Mark for rework</button>
         <label class="switch"><input type="checkbox" id="autoSw"><span class="track"></span>
           Auto-program when an adapter is plugged in</label>
+        <label class="switch"><input type="checkbox" id="autoPrintSw"><span class="track"></span>
+          Print label automatically</label>
         <label class="switch"><input type="checkbox" id="soundSw" checked><span class="track"></span> Sound</label>
       </div>
       <div class="hint" style="margin-top:10px">Shortcut: <kbd>Space</kbd> programs the adapter that is plugged in.
@@ -164,7 +183,7 @@
       <h2>Units in this run (newest first)</h2>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Time (UTC)</th><th>Result</th><th>MAC</th><th>Serial</th><th>Detail</th></tr></thead>
+          <thead><tr><th>Time (UTC)</th><th>Result</th><th>MAC</th><th>Serial</th><th>Detail</th><th>Labels</th></tr></thead>
           <tbody id="recent"></tbody>
         </table>
         <div class="empty" id="recentEmpty">No units yet.</div>
@@ -177,7 +196,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-let state = null, lastSeen = null, audio = null;
+let state = null, lastSeen = null, audio = null, autoPrintedFor = null, printing = false;
 
 async function api(path, body) {
   const opt = body === undefined ? {} : {
@@ -190,8 +209,9 @@ async function api(path, body) {
   return data;
 }
 
-function toast(msg) {
+function toast(msg, ok) {
   const t = $("toast"); t.textContent = msg; t.style.display = "block";
+  t.style.background = ok ? "var(--pass)" : "var(--fail)";
   clearTimeout(toast.timer); toast.timer = setTimeout(() => t.style.display = "none", 6000);
 }
 
@@ -253,6 +273,50 @@ function renderTile(s) {
   return setTile("", "READY", "", st.auto ? "Programming starts automatically…" : "Press Program (or Space).");
 }
 
+// ---------------------------------------------------------------- labels
+function renderLabel(s) {
+  const last = s.last, show = !!(s.run && last && last.printable && !s.station.busy);
+  $("labelBox").hidden = !show;
+  if (!show) return;
+  const src = "/api/label.svg?serial=" + encodeURIComponent(last.serial) + "&v=" + encodeURIComponent(last.time);
+  if ($("labelImg").getAttribute("src") !== src) $("labelImg").src = src;
+  const n = last.labels || 0;
+  $("printBtn").innerHTML = (n ? "Reprint label" : "Print label") + " <kbd>P</kbd>";
+  $("labelStatus").textContent = n ? `Label printed${n > 1 ? " (" + n + "×)" : ""} ✓` : "Label not printed yet";
+  $("labelStatus").className = "label-status" + (n ? " done" : "");
+  // Auto-print once per newly verified / programmed unit.
+  if (s.station.auto_print && n === 0 && autoPrintedFor !== last.time && !printing) {
+    autoPrintedFor = last.time;
+    printLabel(last.serial);
+  }
+}
+
+function printSvg(svg, size) {
+  const [w, h] = size;
+  const frame = document.createElement("iframe");
+  frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0";
+  frame.srcdoc = `<!doctype html><html><head><style>@page{size:${w}mm ${h}mm;margin:0}` +
+                 `html,body{margin:0;padding:0}svg{display:block}</style></head><body>${svg}</body></html>`;
+  frame.onload = () => {
+    frame.contentWindow.focus();
+    frame.contentWindow.print();
+    setTimeout(() => frame.remove(), 60000);
+  };
+  document.body.append(frame);
+}
+
+async function printLabel(serial) {
+  if (printing) return;
+  printing = true;
+  try {
+    const data = await api("/api/label/print", {serial});
+    render(data.state);
+    if (data.print.mode === "browser") printSvg(data.print.svg, data.state.station.label_size);
+    else toast("Label sent: " + data.print.sent_to, true);
+  } catch (e) { toast("Label not printed: " + e.message); }
+  finally { printing = false; }
+}
+
 function td(text, cls) { const c = document.createElement("td"); c.textContent = text; if (cls) c.className = cls; return c; }
 
 function render(s) {
@@ -263,6 +327,8 @@ function render(s) {
   $("keyFp").textContent = st.key_fp;
   $("nolock").hidden = st.lock_units;
   $("backend").textContent = (st.backend || "?").toUpperCase();
+  $("printerName").textContent = st.printer;
+  $("autoPrintSw").checked = st.auto_print;
   const warns = $("warns"); warns.replaceChildren();
   for (const w of st.warnings || []) {
     const pill = document.createElement("span"); pill.className = "pill warn"; pill.textContent = w;
@@ -276,6 +342,7 @@ function render(s) {
     $("rBar").style.width = Math.min(100, 100 * run.done / run.quantity) + "%";
     $("rBlock").textContent = run.block; $("rFailed").textContent = run.failed;
     $("rVerifyFailed").textContent = run.verify_failed || 0;
+    $("rLabelled").textContent = run.labelled || 0;
     $("rSpare").textContent = run.spare_addresses;
     $("rSpare").style.color = run.spare_addresses < run.quantity - run.done ? "var(--fail)" : "";
   } else {
@@ -310,11 +377,24 @@ function render(s) {
               r.mac ? td(r.mac, r.status === "failed" ? "mono retired" : "mono")
                     : td("hidden until verified", "hidden-mac"),
               td(r.serial, "mono"), td(detail));
+    const lc = document.createElement("td");
+    if (r.printable) {
+      lc.append(document.createTextNode((r.labels || 0) + " "));
+      const b = document.createElement("button"); b.className = "mini";
+      b.textContent = r.labels ? "Reprint" : "Print";
+      b.onclick = () => {
+        if (!r.labels || confirm(`Reprint the label for ${r.serial} (${r.mac})? The reprint is logged.`))
+          printLabel(r.serial);
+      };
+      lc.append(b);
+    }
+    tr.append(lc);
     tb.append(tr);
   }
   $("recentEmpty").hidden = s.recent.length > 0;
 
   renderTile(s);
+  renderLabel(s);
   if (s.last && s.last.time && lastSeen !== null && JSON.stringify(s.last) !== lastSeen) {
     if (s.last.outcome === "ok") beep(true);
     else if (["failed", "error", "blocked"].includes(s.last.outcome)) beep(false);
@@ -340,11 +420,20 @@ $("programBtn").onclick = () => {
   act("/api/program", {});
 };
 $("autoSw").onchange = (e) => act("/api/auto", {on: e.target.checked});
+$("printBtn").onclick = () => { const l = state && state.last; if (l && l.printable) {
+  if (!l.labels || confirm(`Reprint the label for ${l.serial}? The reprint is logged.`)) printLabel(l.serial); } };
+$("autoPrintSw").onchange = (e) => act("/api/label/auto", {on: e.target.checked});
 $("reworkBtn").onclick = () => {
   if (confirm("Mark the waiting unit for rework? It is logged as not verified, its MAC is never shown, and it must be set aside."))
     act("/api/verify/abandon", {});
 };
 document.addEventListener("keydown", (e) => {
+  if (e.key === "p" || e.key === "P") {
+    if (!["INPUT", "TEXTAREA"].includes(document.activeElement.tagName) && !$("labelBox").hidden) {
+      e.preventDefault(); $("printBtn").click();
+    }
+    return;
+  }
   if ((e.code === "Space" || e.code === "Enter") && !["INPUT", "BUTTON", "TEXTAREA"].includes(document.activeElement.tagName)) {
     e.preventDefault(); if (!$("programBtn").disabled) $("programBtn").click();
   }

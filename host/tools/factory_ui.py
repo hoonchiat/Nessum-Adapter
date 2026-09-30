@@ -18,6 +18,11 @@ unit is never sent to the browser before it is VERIFIED, and no other unit can
 be programmed while one is waiting for its re-plug. "Mark for rework" logs the
 waiting unit as verify-failed (MAC never shown) and frees the station.
 
+Labels: printed only for a unit whose MAC may be shown (VERIFIED for option C,
+programmed for option A); every print and reprint is logged ('label-printed').
+--printer browser (default) prints from the page; zpl:tcp://HOST[:PORT],
+zpl:/dev/usb/lp0 or file:DIR print from the server (see labels.py).
+
 The key file is read by this server and never sent to the browser. The page only
 sees the key fingerprint. The server listens on 127.0.0.1 only. Standard library
 only, like the other tools.
@@ -30,10 +35,12 @@ import json
 import os
 import sys
 import threading
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import factory_program as fp  # noqa: E402
+import labels  # noqa: E402
 import nessumctl  # noqa: E402
 
 UI_FILE = os.path.join(HERE, "factory_ui.html")
@@ -47,7 +54,8 @@ def now():
 class Station:
     """Programming-station state shared by the HTTP handler and the auto loop."""
 
-    def __init__(self, backend, key, log, lock_units=True):
+    def __init__(self, backend, key, log, lock_units=True, printer=None, label_size=(50, 25),
+                 label_title="Nessum Adapter"):
         # A plain path means an option A console (kept for existing callers/tests).
         self.backend = fp.BackendA(backend) if isinstance(backend, str) else backend
         self.key = key
@@ -60,6 +68,10 @@ class Station:
         self.last = None         # last programming attempt, for the big result tile
         self.handled_serial = None
         self._pending_verify = None  # option C: {serial, mac, run} until the unit is re-plugged
+        self.printer = printer or labels.BrowserPrinter()
+        self.label_size = label_size
+        self.label_title = label_title
+        self.auto_print = False
         self._need_check = True
         self._mutex = threading.Lock()
         self._log_cache = (None, [])
@@ -154,6 +166,17 @@ class Station:
                 self._pending_verify = {"serial": res["serial"], "mac": res["mac"], "run": run["id"]}
         return res
 
+    # --- labels ------------------------------------------------------------------
+    def print_label(self, serial):
+        """Print the label of a unit whose MAC may be shown; logged. Raises ValueError /
+        labels.PrintError when not allowed or the printer fails."""
+        return fp.print_label(self.log, self.printer, serial, self._needs_verify(),
+                              self.label_size, self.label_title)
+
+    def label_svg(self, serial):
+        rec = fp.labelable_record(fp.read_log(self.log), serial, self._needs_verify())
+        return labels.svg_label(labels.label_fields(rec, self.label_title), self.label_size)
+
     def _replug_first_msg(self):
         return (f"unit {self._pending_verify['serial']} is waiting for verification: re-plug it "
                 "first, or mark it for rework")
@@ -233,8 +256,11 @@ class Station:
                             "present": self.present(), "key_fp": self.key_fp,
                             "log": os.path.abspath(self.log), "auto": self.auto, "busy": self.busy,
                             "lock_units": self.lock_units, "warnings": self.backend.warnings(),
-                            "awaiting_replug": bool(self._pending_verify)},
-                "last": self._public_last(),
+                            "awaiting_replug": bool(self._pending_verify),
+                            "printer": self.printer.describe(), "printer_mode": self.printer.mode,
+                            "auto_print": self.auto_print,
+                            "label_size": list(self.label_size)},
+                "last": self._public_last(rows),
             }
         runs = self.known_runs(rows)
         st["runs"] = runs
@@ -242,7 +268,10 @@ class Station:
             info = next((r for r in runs if r["id"] == run["id"]), {"done": 0, "failed": 0, "verify_failed": 0})
             used = [fp.mac_to_int(r["mac"]) for r in rows if r.get("mac") and r["run"] == run["id"]]
             next_int = (max(used) + 1) if used else run["first"]
+            labelled = {(r["serial"], r["mac"]) for r in rows
+                        if r["run"] == run["id"] and r["status"] == "label-printed"}
             run.update(done=info["done"], failed=info["failed"], verify_failed=info["verify_failed"],
+                       labelled=len(labelled),
                        spare_addresses=max(0, run["last"] - next_int + 1),
                        complete=info["done"] >= run["quantity"])
             del run["first"], run["last"]
@@ -261,16 +290,21 @@ class Station:
     def _needs_verify(self):
         return self.backend.name == "c"
 
-    def _public_last(self):
+    def _public_last(self, rows=()):
         last = self.last
         if last and self._needs_verify() and last.get("outcome") in ("ok", "already") \
                 and not last.get("verified"):
             last = dict(last, mac=None)
+        if last and last.get("outcome") == "ok" and last.get("mac"):
+            # MAC is shown, so the unit may be labelled: say how often it has been.
+            last = dict(last, printable=True, labels=fp.labels_printed(rows, last["serial"], last["mac"]))
         return last
 
     def _public_rows(self, recent, rows):
         if not self._needs_verify():
-            return recent
+            return [dict(r, printable=r["status"] in fp.DONE,
+                         labels=fp.labels_printed(rows, r["serial"], r["mac"]) if r["status"] in fp.DONE else 0)
+                    for r in recent]
         verified = {(r["serial"], r["mac"]) for r in rows if r["status"] == "verified"}
         pv = self._pending_verify
         out = []
@@ -282,6 +316,8 @@ class Station:
                          detail="awaiting re-plug verification" if waiting else "not verified")
             elif r["status"] == "verify-failed":
                 r["mac"] = ""
+            r["printable"] = r["status"] == "verified"
+            r["labels"] = fp.labels_printed(rows, r["serial"], r["mac"]) if r["printable"] else 0
             out.append(r)
         return out
 
@@ -314,6 +350,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._send(200, f.read(), "text/html; charset=utf-8")
         if self.path == "/api/state":
             return self._send(200, self.station.state())
+        url = urllib.parse.urlparse(self.path)
+        if url.path == "/api/label.svg":
+            serial = dict(urllib.parse.parse_qsl(url.query)).get("serial", "")
+            try:
+                return self._send(200, self.station.label_svg(serial).encode(), "image/svg+xml")
+            except ValueError as e:
+                return self._send(403, {"error": str(e)})
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -341,6 +384,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 st.program()
             elif self.path == "/api/verify/abandon":
                 st.abandon_verification()
+            elif self.path == "/api/label/print":
+                out = st.print_label(str(body.get("serial", "")))
+                return self._send(200, {"print": out, "state": st.state()})
+            elif self.path == "/api/label/auto":
+                st.auto_print = bool(body.get("on"))
             elif self.path == "/api/auto":
                 if body.get("on") and not st.run:
                     raise ValueError("select a production run first")
@@ -348,7 +396,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 st.handled_serial = None if st.auto else st.handled_serial
             else:
                 return self._send(404, {"error": "not found"})
-        except (ValueError, fp.RunError, nessumctl.MacError) as e:
+        except (ValueError, fp.RunError, nessumctl.MacError, labels.PrintError) as e:
             return self._send(400, {"error": str(e)})
         return self._send(200, st.state())
 
@@ -365,6 +413,12 @@ def main(argv=None):
     p.add_argument("--log", required=True, help="append-only CSV log shared by all runs")
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--no-lock", action="store_true", help="engineering units only: do not lock")
+    p.add_argument("--printer", default="browser",
+                   help="browser (default) | zpl:tcp://HOST[:PORT] | zpl:/dev/usb/lp0 | file:DIR")
+    p.add_argument("--label-size", default="50x25", help="label size in mm (default 50x25)")
+    p.add_argument("--label-title", default="Nessum Adapter", help="first line of the label")
+    p.add_argument("--dpmm", type=int, default=8, choices=(6, 8, 12, 24),
+                   help="ZPL printer resolution in dots/mm (8 = 203 dpi, 12 = 300 dpi)")
     args = p.parse_args(argv)
 
     try:
@@ -373,7 +427,14 @@ def main(argv=None):
         print(f"factory_ui: bad --key-file: {e}", file=sys.stderr)
         return 2
 
-    station = Station(fp.make_backend(args), key, args.log, lock_units=not args.no_lock)
+    try:
+        printer = labels.make_printer(args.printer, args.dpmm)
+        size = labels.parse_size(args.label_size)
+    except ValueError as e:
+        print(f"factory_ui: {e}", file=sys.stderr)
+        return 2
+    station = Station(fp.make_backend(args), key, args.log, lock_units=not args.no_lock,
+                      printer=printer, label_size=size, label_title=args.label_title)
     stop = threading.Event()
     threading.Thread(target=station.auto_loop, args=(stop,), daemon=True).start()
     server = make_server(station, args.port)
