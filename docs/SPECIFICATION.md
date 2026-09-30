@@ -100,7 +100,8 @@ buffering (≈ 32–64 KiB of frame queue per direction) to absorb bursts.
 | Line coupling | Wideband coupling transformer + DC-blocking capacitors + TVS | Per the IC vendor reference design, adapted for twisted pair / 24 V (§6) | — |
 | Power | 5 V USB → buck 3.3 V (+ RT1062 internal core regulator) | The SC1320A needs only 3.3 V | Power budget (§5) |
 
-A preliminary BOM is in [`../hardware/bom.csv`](../hardware/bom.csv).
+The rev 0 schematic is [`../hardware/schematic.svg`](../hardware/schematic.svg), and the
+preliminary BOM with the same reference designators is [`../hardware/bom.csv`](../hardware/bom.csv).
 
 ### 4.1 Nessum IC selection
 

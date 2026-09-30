@@ -95,8 +95,8 @@ def fmt_block(first, last):
     return f"{int_to_mac(first)}-{int_to_mac(last)}"
 
 
-def open_run(log, rows, run, first, last, quantity, key_fp, new_key=False):
-    """Validate this run against the log, recording it on first use.
+def open_run(log, rows, run, first, last, quantity, key_fp, new_key=False, record=True):
+    """Validate this run against the log, recording it on first use (if record).
 
     Returns the rows belonging to this run.
     """
@@ -131,7 +131,7 @@ def open_run(log, rows, run, first, last, quantity, key_fp, new_key=False):
             f, l, q = declared[run]
             raise RunError(f"run {run} was opened with block {fmt_block(f, l)} and quantity {q}; "
                            "refusing different values mid-run")
-    else:
+    elif record:
         append_log(log, run=run, status="run-open", key_fp=key_fp,
                    detail=f"block={fmt_block(first, last)};quantity={quantity}")
     return [r for r in rows if r["run"] == run]
@@ -153,8 +153,15 @@ def next_address(rows, first, last):
     return None
 
 
-def program_one(con, log, run, first, last, quantity, key, lock=True, force=False, new_key=False):
-    """Program one adapter's MAC and network key. Returns (exit_code, message)."""
+def program_one(con, log, run, first, last, quantity, key, lock=True, force=False, new_key=False,
+                result=None):
+    """Program one adapter's MAC and network key. Returns (exit_code, message).
+
+    If `result` is a dict it is filled with: outcome ('ok', 'already', 'complete',
+    'failed', 'error'), serial and mac - used by the production UI.
+    """
+    res = result if result is not None else {}
+    res.update(outcome="error", serial=None, mac=None)
     key_fp = nessumctl.key_fingerprint(key)
     try:
         run_rows = open_run(log, read_log(log), run, first, last, quantity, key_fp, new_key)
@@ -162,20 +169,24 @@ def program_one(con, log, run, first, last, quantity, key, lock=True, force=Fals
         return 2, f"run {run}: {e}"
     done_count = sum(1 for r in run_rows if r["status"] in DONE)
     if done_count >= quantity:
+        res["outcome"] = "complete"
         return 1, f"run {run} is complete ({done_count}/{quantity} units) - nothing done"
 
     ver = nessumctl.merged(con.command("VERSION"))
-    serial = ver.get("serial", "?")
+    serial = res["serial"] = ver.get("serial", "?")
     info = nessumctl.merged(con.command("MAC GET"))
 
     if info.get("locked") == "yes":
+        res.update(outcome="already", mac=info.get("programmed"))
         return 1, f"{serial}: already locked with {info.get('programmed')} - nothing done"
     if info.get("programmed", "none") != "none" and not force:
+        res.update(outcome="already", mac=info.get("programmed"))
         return 1, f"{serial}: already programmed with {info['programmed']} (use --force to replace)"
 
     mac = next_address(read_log(log), first, last)
     if mac is None:
         return 1, f"run {run}: address block exhausted after {done_count}/{quantity} units (too many failures?)"
+    res["mac"] = mac
 
     append_log(log, run=run, status="reserved", mac=mac, serial=serial, key_fp=key_fp)
     try:
@@ -193,9 +204,11 @@ def program_one(con, log, run, first, last, quantity, key, lock=True, force=Fals
         con.command("REBOOT")
     except (nessumctl.ProtocolError, RuntimeError, TimeoutError, ConnectionError) as e:
         append_log(log, run=run, status="failed", mac=mac, serial=serial, key_fp=key_fp, detail=str(e))
+        res["outcome"] = "failed"
         return 1, f"{serial}: FAILED programming {mac}: {e} (address retired, not reused)"
 
     append_log(log, run=run, status="locked" if lock else "programmed", mac=mac, serial=serial, key_fp=key_fp)
+    res["outcome"] = "ok"
     done = "programmed + locked" if lock else "programmed"
     return 0, f"{serial}: {mac}, key {key_fp}, {done} - run {run} unit {done_count + 1}/{quantity}"
 

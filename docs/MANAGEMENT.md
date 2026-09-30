@@ -165,6 +165,33 @@ into the master log afterwards.
 
 `--no-lock` is for engineering units only.
 
+### 3.1 Production UI
+
+For the line, [`../host/tools/factory_ui.py`](../host/tools/factory_ui.py) wraps the same
+code in a browser page. Start it on the station PC and open `http://127.0.0.1:8080`:
+
+```sh
+factory_ui.py --key-file nessum-common.key --log production-log.csv
+```
+
+- **Run panel:** start a run (ID, MAC block, quantity) or resume one listed from the log.
+  It shows progress, failed units and spare addresses (in red when failures have eaten
+  into the spare margin). All run checks are applied when the run is started.
+- **Result tile:** a large **PASS** (with the MAC to write on the label), **FAIL** (set
+  the unit aside; its address is retired and is *not* shown, so it can't end up on a
+  label), **ALREADY PROGRAMMED**, or **RUN COMPLETE**. It also plays a pass/fail sound.
+- **Program button** (or **Space**), or **auto mode**: each newly plugged-in adapter is
+  programmed once. Units are recognised by serial number, so an adapter re-enumerating
+  after its own REBOOT is not programmed twice.
+- **Unit list:** newest first, with time, result, MAC, serial and detail.
+
+Security: the server listens on 127.0.0.1 only, rejects requests from other web pages
+(CSRF) and foreign Host headers (DNS rebinding), and never sends the key to the browser.
+The page only shows the fingerprint.
+
+![Production UI: pass](images/factory-ui-pass.png)
+![Production UI: fail](images/factory-ui-fail.png)
+
 The programming station is trusted: the key crosses USB in the clear once per unit, at the
 factory.
 

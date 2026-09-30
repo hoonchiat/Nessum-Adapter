@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nessum Production Station</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f3f4f6; --panel: #ffffff; --ink: #111827; --muted: #6b7280; --line: #e5e7eb;
+    --pass: #15803d; --pass-bg: #dcfce7; --fail: #b91c1c; --fail-bg: #fee2e2;
+    --warn: #b45309; --warn-bg: #fef3c7; --info: #1d4ed8; --info-bg: #dbeafe;
+    --idle-bg: #f9fafb; --accent: #1d4ed8; --btn: #1d4ed8; --radius: 14px;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0f17; --panel: #131a26; --ink: #f3f4f6; --muted: #9ca3af; --line: #253046;
+      --pass: #4ade80; --pass-bg: #0f2e1b; --fail: #f87171; --fail-bg: #3a1212;
+      --warn: #fbbf24; --warn-bg: #3a2a08; --info: #93c5fd; --info-bg: #102447;
+      --idle-bg: #0f1520; --accent: #60a5fa; --btn: #2563eb;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center;
+           padding: 14px 24px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 20px; margin: 0; margin-right: auto; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
+          background: var(--idle-bg); border: 1px solid var(--line); font-size: 14px; white-space: nowrap; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+  .pill.on .dot { background: var(--pass); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn); border-color: transparent; font-weight: 600; }
+  .mono { font-family: var(--mono); }
+  main { display: grid; grid-template-columns: 360px 1fr; gap: 20px; padding: 20px 24px; max-width: 1500px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 14px; }
+  label { display: block; font-size: 14px; color: var(--muted); margin: 12px 0 4px; }
+  input { width: 100%; padding: 10px 12px; font-size: 16px; border-radius: 10px; border: 1px solid var(--line);
+          background: var(--idle-bg); color: var(--ink); }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .hint { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  button { font: inherit; cursor: pointer; border-radius: 10px; border: 1px solid var(--line);
+           background: var(--idle-bg); color: var(--ink); padding: 10px 16px; }
+  button.primary { background: var(--btn); color: #fff; border-color: transparent; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .run-id { font-size: 28px; font-weight: 700; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 14px 0; font-size: 15px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; }
+  .bar { height: 14px; background: var(--idle-bg); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+  .bar > div { height: 100%; background: var(--pass); width: 0; transition: width .3s; }
+  .count { font-size: 34px; font-weight: 700; margin: 8px 0 6px; font-variant-numeric: tabular-nums; }
+  .count small { font-size: 18px; color: var(--muted); font-weight: 500; }
+  .runs { list-style: none; padding: 0; margin: 8px 0 0; }
+  .runs li { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+             padding: 10px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .tile { border-radius: var(--radius); padding: 36px 32px; text-align: center; min-height: 330px;
+          display: flex; flex-direction: column; justify-content: center; gap: 10px;
+          background: var(--idle-bg); border: 3px solid var(--line); transition: background .2s, border-color .2s; }
+  .tile .word { font-size: clamp(40px, 6vw, 76px); font-weight: 800; letter-spacing: .02em; line-height: 1; }
+  .tile .mac { font-family: var(--mono); font-size: clamp(26px, 3.4vw, 44px); font-weight: 700; }
+  .tile .sub { font-size: 20px; color: var(--muted); }
+  .tile .msg { font-size: 16px; color: var(--muted); max-width: 60ch; margin: 0 auto; overflow-wrap: anywhere; }
+  .tile.pass { background: var(--pass-bg); border-color: var(--pass); } .tile.pass .word { color: var(--pass); }
+  .tile.fail { background: var(--fail-bg); border-color: var(--fail); } .tile.fail .word { color: var(--fail); }
+  .tile.warn { background: var(--warn-bg); border-color: var(--warn); } .tile.warn .word { color: var(--warn); }
+  .tile.info { background: var(--info-bg); border-color: var(--info); } .tile.info .word { color: var(--info); }
+  .tile.busy .word { animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .controls { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin: 18px 0 0; }
+  .controls .big { font-size: 22px; padding: 18px 34px; min-width: 260px; }
+  .switch { display: inline-flex; align-items: center; gap: 10px; font-size: 16px; cursor: pointer; user-select: none; }
+  .switch input { display: none; }
+  .switch .track { width: 52px; height: 30px; border-radius: 999px; background: var(--line); position: relative; transition: background .2s; }
+  .switch .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px;
+                          border-radius: 50%; background: #fff; transition: left .2s; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+  .switch input:checked + .track { background: var(--pass); }
+  .switch input:checked + .track::after { left: 25px; }
+  table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 15px; }
+  td { white-space: nowrap; } td:last-child { white-space: normal; }
+  td.retired { text-decoration: line-through; color: var(--muted); }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+  td.st-ok { color: var(--pass); font-weight: 700; } td.st-fail { color: var(--fail); font-weight: 700; }
+  .table-wrap { overflow-x: auto; }
+  .empty { color: var(--muted); padding: 14px 0; }
+  .right-col { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+  #toast { position: fixed; left: 50%; top: 16px; transform: translateX(-50%); max-width: min(700px, 92vw);
+           background: var(--fail); color: #fff; padding: 12px 18px; border-radius: 10px; font-weight: 600;
+           box-shadow: 0 6px 24px rgba(0,0,0,.25); display: none; z-index: 10; }
+  kbd { font-family: var(--mono); font-size: 13px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Nessum Adapter · Production Station</h1>
+  <span class="pill" id="devPill"><span class="dot"></span><span id="devText">No adapter</span></span>
+  <span class="pill">Key <span class="mono" id="keyFp">—</span></span>
+  <span class="pill warn" id="nolock" hidden>ENGINEERING MODE: units are NOT locked</span>
+</header>
+
+<main>
+  <section class="card" id="runCard" aria-label="Production run">
+    <h2>Production run</h2>
+
+    <div id="runNone">
+      <form id="runForm" autocomplete="off">
+        <label for="runId">Run ID</label>
+        <input id="runId" placeholder="R2026-10" required maxlength="40">
+        <label for="runBlock">MAC address block</label>
+        <input id="runBlock" class="mono" placeholder="00:50:c2:aa:00:00-00:50:c2:aa:01:ff" required>
+        <div class="hint">first-last, or base/prefix (e.g. 00:50:c2:aa:00:00/39). Make it a little larger than the quantity.</div>
+        <label for="runQty">Quantity (units)</label>
+        <input id="runQty" type="number" min="1" placeholder="500" required>
+        <div style="margin-top:16px"><button class="primary" type="submit">Start run</button></div>
+      </form>
+      <div id="resumeBox" hidden>
+        <h2 style="margin-top:24px">Resume a run from the log</h2>
+        <ul class="runs" id="runList"></ul>
+      </div>
+    </div>
+
+    <div id="runActive" hidden>
+      <div class="run-id" id="rId"></div>
+      <div class="count"><span id="rDone">0</span> <small>/ <span id="rQty">0</span> units</small></div>
+      <div class="bar"><div id="rBar"></div></div>
+      <dl class="kv">
+        <dt>Block</dt><dd class="mono" id="rBlock"></dd>
+        <dt>Failed</dt><dd id="rFailed"></dd>
+        <dt>Spare addresses</dt><dd id="rSpare"></dd>
+      </dl>
+      <button id="closeRun">Close run</button>
+    </div>
+  </section>
+
+  <div class="right-col">
+    <section class="card" aria-live="polite">
+      <div class="tile" id="tile">
+        <div class="word" id="tWord">SELECT RUN</div>
+        <div class="mac" id="tMac"></div>
+        <div class="sub" id="tSub">Start or resume a production run on the left.</div>
+        <div class="msg" id="tMsg"></div>
+      </div>
+      <div class="controls">
+        <button class="primary big" id="programBtn" disabled>Program adapter</button>
+        <label class="switch"><input type="checkbox" id="autoSw"><span class="track"></span>
+          Auto-program when an adapter is plugged in</label>
+        <label class="switch"><input type="checkbox" id="soundSw" checked><span class="track"></span> Sound</label>
+      </div>
+      <div class="hint" style="margin-top:10px">Shortcut: <kbd>Space</kbd> programs the adapter that is plugged in.</div>
+    </section>
+
+    <section class="card">
+      <h2>Units in this run (newest first)</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time (UTC)</th><th>Result</th><th>MAC</th><th>Serial</th><th>Detail</th></tr></thead>
+          <tbody id="recent"></tbody>
+        </table>
+        <div class="empty" id="recentEmpty">No units yet.</div>
+      </div>
+    </section>
+  </div>
+</main>
+<div id="toast" role="alert"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let state = null, lastSeen = null, audio = null;
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {
+    method: "POST", headers: {"Content-Type": "application/json", "X-Station": "1"},
+    body: JSON.stringify(body)
+  };
+  const r = await fetch(path, opt);
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.style.display = "block";
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.style.display = "none", 6000);
+}
+
+function beep(ok) {
+  if (!$("soundSw").checked) return;
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    const notes = ok ? [[1175, 0, .12], [1568, .13, .18]] : [[220, 0, .25], [196, .3, .35]];
+    for (const [f, start, dur] of notes) {
+      const o = audio.createOscillator(), g = audio.createGain();
+      o.type = ok ? "sine" : "square"; o.frequency.value = f;
+      g.gain.setValueAtTime(.12, audio.currentTime + start);
+      g.gain.exponentialRampToValueAtTime(.001, audio.currentTime + start + dur);
+      o.connect(g).connect(audio.destination);
+      o.start(audio.currentTime + start); o.stop(audio.currentTime + start + dur);
+    }
+  } catch (e) { /* no audio: ignore */ }
+}
+
+const OUTCOME = {
+  ok:       ["pass", "PASS"],
+  failed:   ["fail", "FAIL"],
+  error:    ["fail", "ERROR"],
+  already:  ["warn", "ALREADY PROGRAMMED"],
+  complete: ["info", "RUN COMPLETE"],
+};
+
+function setTile(cls, word, mac, sub, msg) {
+  $("tile").className = "tile " + (cls || "");
+  $("tWord").textContent = word; $("tMac").textContent = mac || "";
+  $("tSub").textContent = sub || ""; $("tMsg").textContent = msg || "";
+}
+
+function renderTile(s) {
+  const st = s.station, run = s.run, last = s.last;
+  if (!run) return setTile("", "SELECT RUN", "", "Start or resume a production run on the left.");
+  if (st.busy) return setTile("info busy", "PROGRAMMING…", "", "Do not unplug the adapter.");
+  if (last) {
+    const [cls, word] = OUTCOME[last.outcome] || OUTCOME.error;
+    let sub = last.serial ? "Serial " + last.serial : "";
+    if (last.outcome === "ok") sub += " · unplug it and insert the next adapter";
+    if (last.outcome === "failed") sub += " · set this unit aside for rework";
+    if (last.outcome === "already") sub += " · this unit is already done; unplug it";
+    // A failed unit did NOT get its address (it was retired): never show it big.
+    const mac = (last.outcome === "ok" || last.outcome === "already") ? last.mac : "";
+    return setTile(cls, word, mac, sub, last.outcome === "ok" ? "" : last.message);
+  }
+  if (run.complete) return setTile("info", "RUN COMPLETE", "", `All ${run.quantity} units programmed.`);
+  if (!st.present) return setTile("", "INSERT ADAPTER", "", st.auto ? "It will be programmed automatically." : "Plug in an adapter, then press Program.");
+  return setTile("", "READY", "", st.auto ? "Programming starts automatically…" : "Press Program (or Space).");
+}
+
+function td(text, cls) { const c = document.createElement("td"); c.textContent = text; if (cls) c.className = cls; return c; }
+
+function render(s) {
+  state = s;
+  const st = s.station;
+  $("devPill").classList.toggle("on", st.present);
+  $("devText").textContent = st.present ? "Adapter connected" : "No adapter";
+  $("keyFp").textContent = st.key_fp;
+  $("nolock").hidden = st.lock_units;
+
+  const run = s.run;
+  $("runNone").hidden = !!run; $("runActive").hidden = !run;
+  if (run) {
+    $("rId").textContent = run.id; $("rDone").textContent = run.done; $("rQty").textContent = run.quantity;
+    $("rBar").style.width = Math.min(100, 100 * run.done / run.quantity) + "%";
+    $("rBlock").textContent = run.block; $("rFailed").textContent = run.failed;
+    $("rSpare").textContent = run.spare_addresses;
+    $("rSpare").style.color = run.spare_addresses < run.quantity - run.done ? "var(--fail)" : "";
+  } else {
+    const list = $("runList"); list.replaceChildren();
+    for (const r of s.runs) {
+      const li = document.createElement("li");
+      const txt = document.createElement("span");
+      txt.innerHTML = "<b></b> <span class='mono'></span>";
+      txt.querySelector("b").textContent = r.id;
+      txt.querySelector("span").textContent = ` ${r.done}/${r.quantity}`;
+      const b = document.createElement("button"); b.textContent = "Resume";
+      b.onclick = () => startRun(r.id, r.block, r.quantity);
+      li.append(txt, b); list.append(li);
+    }
+    $("resumeBox").hidden = s.runs.length === 0;
+  }
+
+  $("programBtn").disabled = !run || st.busy || !st.present || (run && run.complete);
+  $("autoSw").checked = st.auto; $("autoSw").disabled = !run;
+
+  const tb = $("recent"); tb.replaceChildren();
+  for (const r of s.recent) {
+    const ok = r.status !== "failed";
+    const tr = document.createElement("tr");
+    tr.append(td(r.timestamp.replace("T", " ").replace("+00:00", "")),
+              td(ok ? "PASS" : "FAIL", ok ? "st-ok" : "st-fail"),
+              td(r.mac, ok ? "mono" : "mono retired"), td(r.serial, "mono"), td(ok ? r.status : "address retired · " + r.detail));
+    tb.append(tr);
+  }
+  $("recentEmpty").hidden = s.recent.length > 0;
+
+  renderTile(s);
+  if (s.last && s.last.time && lastSeen !== null && JSON.stringify(s.last) !== lastSeen) {
+    if (s.last.outcome === "ok") beep(true);
+    else if (s.last.outcome === "failed" || s.last.outcome === "error") beep(false);
+  }
+  lastSeen = JSON.stringify(s.last);
+}
+
+async function refresh() {
+  try { render(await api("/api/state")); }
+  catch (e) { setTile("fail", "STATION OFFLINE", "", "Is factory_ui.py still running?", String(e)); }
+}
+
+async function act(path, body) {
+  try { render(await api(path, body)); } catch (e) { toast(e.message); refresh(); }
+}
+
+function startRun(id, block, quantity) { act("/api/run", {id, block, quantity: Number(quantity)}); }
+
+$("runForm").onsubmit = (e) => { e.preventDefault(); startRun($("runId").value, $("runBlock").value, $("runQty").value); };
+$("closeRun").onclick = () => { if (confirm("Close this run? You can resume it later from the log.")) act("/api/run/close", {}); };
+$("programBtn").onclick = () => {
+  setTile("info busy", "PROGRAMMING…", "", "Do not unplug the adapter.");
+  act("/api/program", {});
+};
+$("autoSw").onchange = (e) => act("/api/auto", {on: e.target.checked});
+document.addEventListener("keydown", (e) => {
+  if ((e.code === "Space" || e.code === "Enter") && !["INPUT", "BUTTON", "TEXTAREA"].includes(document.activeElement.tagName)) {
+    e.preventDefault(); if (!$("programBtn").disabled) $("programBtn").click();
+  }
+});
+
+refresh();
+setInterval(refresh, 700);
+</script>
+</body>
+</html>

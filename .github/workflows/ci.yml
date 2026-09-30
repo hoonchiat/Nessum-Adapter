@@ -1,7 +1,8 @@
 name: CI
 
-# Host-side checks: nessumctl / factory_program tests against the protocol
-# simulator, and a shell syntax check of the bring-up script.
+# Host-side checks: nessumctl / factory_program / factory_ui tests against the
+# protocol simulator, a shell syntax check of the bring-up script, and a check
+# that the committed schematic matches its generator.
 
 on:
   push:
@@ -25,3 +26,8 @@ jobs:
 
       - name: Shell syntax check
         run: sh -n host/linux/check-adapter.sh
+
+      - name: Schematic SVG is up to date with its generator
+        run: |
+          python3 hardware/gen_schematic.py
+          git diff --exit-code hardware/schematic.svg
