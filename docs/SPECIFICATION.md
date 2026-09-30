@@ -55,9 +55,11 @@ port through its USB 2.0 host port, without writing or maintaining a custom kern
 | # | Architecture | Pros | Cons | Verdict |
 |---|---|---|---|---|
 | A | **USB-HS MCU + RMII MAC-to-MAC to Nessum IC**, MCU runs CDC-NCM | Driverless on Linux. Full control of the USB descriptors. Management channel on the same USB cable. Few extra parts. | Firmware for the bridge MCU has to be written. | **Selected** |
-| B | Off-the-shelf USB↔Ethernet bridge (ASIX / Microchip LAN95xx class) + Nessum IC | No firmware to write | Most of these bridges have an integrated PHY and no exposed MII/RMII. Would need PHY-to-PHY back-to-back or magnetics. No path for managing the Nessum IC. Vendor drivers (`asix`, `smsc95xx`) are fine, but the design is locked to that part. | Fallback |
-| C | Nessum IC UART/SPI straight to a USB-UART bridge | Simplest hardware | Throughput is limited by UART/SPI. Needs a custom host protocol or driver. | Rejected |
-| D | Put the Nessum IC on the Cortex-A board over RMII/SPI | Lowest BOM | Not a USB adapter. Needs board changes and a custom device-tree/driver. | Out of scope |
+| B | ASIX AX88772C (Reverse-RMII, MAC-to-MAC) + Nessum IC; key loaded by a factory fixture | No firmware to write. In-kernel `asix` driver. | Key lock depends entirely on the SC1320A. MAC not lockable. Carrier always up. No in-field management. | Alternative: [ALTERNATIVES.md](ALTERNATIVES.md) |
+| C | USB hub + AX88772C + CP2102N USB-UART + Nessum IC | No firmware. In-field status over USB. | As B, and the host can reach the SC1320A UART | Alternative: [ALTERNATIVES.md](ALTERNATIVES.md) |
+| D | LAN9512 (hub + Ethernet, MII) + MegaChips MLKHN1501AM | One chip for hub + Ethernet | SC1320A is RMII only, so this needs the MegaChips IC. MII MAC-to-MAC unconfirmed. | Noted in [ALTERNATIVES.md §5](ALTERNATIVES.md#5-option-d-not-drawn-lan9512--megachips) |
+| E | Nessum IC UART/SPI straight to a USB-UART bridge | Simplest hardware | Throughput is limited by UART/SPI. Needs a custom host protocol or driver. | Rejected |
+| F | Put the Nessum IC on the Cortex-A board over RMII/SPI | Lowest BOM | Not a USB adapter. Needs board changes and a custom device-tree/driver. | Out of scope |
 
 ### 3.2 Selected datapath (option A)
 

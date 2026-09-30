@@ -1,0 +1,20 @@
+# Options B and C: name the AX88772C "eth2" and (option C) give the CP2102N a
+# stable name. Install to /etc/udev/rules.d/ and run:
+#   udevadm control --reload && udevadm trigger
+#
+# The in-kernel asix and cp210x drivers bind only to known VID:PIDs, so these
+# adapters keep the vendors' default IDs (ASIX 0b95:772b, Silicon Labs 10c4:ea60)
+# and are told apart from other ASIX / CP210x devices by the product string that
+# the factory writes into the AX88772C EEPROM and the CP2102N configuration.
+# (With your own VID:PID, the IDs would have to be added to the asix/cp210x
+# driver tables with a small kernel patch.)
+#
+# Numbered below 80 so the NAME wins over systemd's 80-net-setup-link.rules.
+
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="asix", \
+  ATTRS{idVendor}=="0b95", ATTRS{idProduct}=="772b", ATTRS{product}=="Nessum Adapter", \
+  NAME="eth2"
+
+# Option C only: management serial port -> /dev/nessum-mgmt (root + netdev group).
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", \
+  ATTRS{product}=="Nessum Adapter Mgmt", SYMLINK+="nessum-mgmt", MODE="0660", GROUP="netdev"
