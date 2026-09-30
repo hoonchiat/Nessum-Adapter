@@ -1,5 +1,7 @@
 # Host integration for options B and C
 
+Option C is the selected design, so these are the host files to install.
+
 Options B and C replace the i.MX RT1062 with fixed-function chips (see
 [`../../../docs/ALTERNATIVES.md`](../../../docs/ALTERNATIVES.md)). The host side changes:
 

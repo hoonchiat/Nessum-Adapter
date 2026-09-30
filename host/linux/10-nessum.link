@@ -1,4 +1,5 @@
 # systemd .link file: give the Nessum adapter a stable interface name.
+# OPTION A (fallback, cdc_ncm) only. Option C: options-bc/70-nessum-options-bc.rules.
 # Install to /etc/systemd/network/ and rebuild the initramfs if it holds .link files.
 #
 # Matches on USB VID:PID (placeholders, spec §7), not on MAC, so the name stays the same

@@ -1,9 +1,8 @@
 # Alternative designs: options B and C (no microcontroller)
 
-**Status:** Draft v0.1. Option **A** (i.MX RT1062 bridge MCU, the rest of this repo) is
-still the baseline. Options B and C remove the microcontroller and use standard
-fixed-function chips instead. Which option to build depends mainly on the answers to
-the Socionext questions in [§6](#6-decision-questions-for-socionext).
+**Status:** Draft v0.2. **Option C is selected** (2026-09-30). Option **A** (i.MX RT1062
+bridge MCU) is the fallback if the SC1320A cannot lock its key. Option B stays on
+record. Option C's go/no-go is the Socionext questions in [§6](#6-decision-questions-for-socionext).
 
 | | Schematic (rev 0) | BOM |
 |---|---|---|

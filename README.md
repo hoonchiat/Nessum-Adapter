@@ -4,28 +4,83 @@ A small USB 2.0 High-Speed dongle that gives a **TI AM62x** (Cortex-A53) Linux s
 **Nessum** (IEEE 1901 wavelet-OFDM, formerly *HD-PLC*) wired link over existing field
 wiring: an **RS-485 twisted pair** or a **low-power 24 V AC/DC cable**.
 
-To Linux it is a **standard Ethernet port, `eth2`**. It enumerates as a USB CDC-NCM
-device, the stock `cdc_ncm` driver binds to it, and it appears as an ordinary Ethernet
-interface with a MAC, MTU 1500, carrier and VLAN support. Existing networking software
-works unchanged, and no custom kernel driver is needed.
+**Selected design: option C.** One USB plug, one on-board USB hub, and two standard
+bridge chips, with **no microcontroller and no firmware**:
 
-Each unit's **Ethernet MAC (from the address block of its production run) and the
-common Nessum network key are programmed at the factory and then locked**. After that neither can be changed over USB,
-and the key can never be read back.
+- **ASIX AX88772C** (USB ↔ Ethernet, Reverse-RMII MAC-to-MAC to the Nessum IC).
+  Linux's in-kernel `asix` driver makes it a **standard Ethernet port, `eth2`**.
+  Existing networking software works unchanged.
+- **Silicon Labs CP2102N** (USB ↔ UART to the Nessum IC). The in-kernel `cp210x`
+  driver gives `/dev/nessum-mgmt` for link status and for factory programming of the
+  network key.
 
-```sh
-# Factory station: once per adapter; each production run has its own MAC block and quantity
-factory_program.py --run R2026-10 --block 00:50:c2:aa:00:00-00:50:c2:aa:01:ff --quantity 500 \
-    --key-file nessum-common.key --log production-log.csv
+Each unit's **MAC (from the address block of its production run) and the common Nessum
+network key are programmed at the factory**. Two trade-offs of option C are accepted and
+recorded in the [spec §2](docs/SPECIFICATION.md#2-assumptions--clarifications):
 
-# In the field (read-only once locked)
-nessumctl mac get        # active MAC, locked=yes
-nessumctl key status     # key set, fingerprint only
-nessumctl status         # Nessum link state and rate
+- **MAC:** it lives in the AX88772C's EEPROM and **cannot be hardware-locked**, so root on
+  the host can change it.
+- **Key lock:** keeping the network key unreadable and unchangeable must be done by the
+  **SC1320A itself**. Confirming that with Socionext is the go/no-go for option C. If it
+  can't, the fallback is option A, the microcontroller design, which is kept in this repo.
+
+> **Status:** Requirements, architecture, rev 0 schematics for options A/B/C, host
+> integration, and the factory run/log logic and browser UI. There is no rev A schematic
+> yet. The option C factory backend is pending the SC1320A command set. Open questions
+> are in [`docs/SPECIFICATION.md` §9](docs/SPECIFICATION.md#9-open-questions).
+
+## At a glance
+
+| | |
+|---|---|
+| **Host** | TI AM62x, TI Processor SDK Linux. In-kernel `asix` + `cp210x` + DWC3/AM62 USB host |
+| **Host interface** | USB 2.0 High-Speed, USB-C or USB-A plug; on-board USB2422 2-port hub |
+| **Host view** | `eth2` (asix) + `/dev/nessum-mgmt` (cp210x → SC1320A UART) |
+| **Link state** | Carrier always up in Linux (Reverse-RMII has no PHY link); the real Nessum state is read over `/dev/nessum-mgmt` |
+| **MAC address** | Factory-programmed per production run into the AX88772C EEPROM (duplicate-free allocation, append-only log); not hardware-lockable |
+| **Network key** | One common key, factory-programmed into the SC1320A over the CP2102N; lock must be provided by the SC1320A |
+| **Nessum IC** | **Socionext SC1320A** (HD-PLC4, single 3.3 V, ~0.2 W, 7×7 QFN). See [spec §4.1](docs/SPECIFICATION.md#41-nessum-ic-selection). |
+| **Line side** | Existing RS-485 twisted pair **or** 24 V AC/DC cable. Coupling transformer + DC-blocking caps + TVS, 2-pin terminal block. SELV only, no mains. |
+| **Power** | USB bus-powered (budget 2.5 W; estimate TBD from datasheets) |
+
+## Block diagram
+
+```
+ ┌──────────── Linux host (TI AM62x) ──────────────────┐
+ │  asix    ──► eth2   (eth0/eth1 = CPSW)              │
+ │  cp210x  ──► /dev/nessum-mgmt                       │
+ └──────────────────────┬──────────────────────────────┘
+                        │ USB 2.0 HS
+ ┌──────────────────────▼──────────────────────────────┐
+ │  USB2422 2-port hub                                 │
+ │     port 1 ─► AX88772C       port 2 ─► CP2102N      │
+ └───────────┬───────────────────────────┬─────────────┘
+ Reverse-RMII│ (MAC-to-MAC)          UART │  RESET / INT (CP2102N GPIO)
+ ┌───────────▼───────────────────────────▼─────────────┐
+ │  Nessum IC: Socionext SC1320A                       │
+ └───────────────────────┬─────────────────────────────┘
+                         │ coupling xfmr + DC-block caps + TVS
+                    ═════╧═════  RS-485 twisted pair  |  24 V AC/DC cable
 ```
 
-For the production line there is a browser UI with big PASS/FAIL, run progress and a
-unit list. It runs locally on the station PC and uses the same programming code:
+## Schematic
+
+[`hardware/options/schematic-option-c.svg`](hardware/options/schematic-option-c.svg) is the
+rev 0 (architecture-level) schematic of the selected design: every part and net, with
+signal names but no pin numbers yet. Pin names are functional until the datasheets are
+in hand. It is generated by [`hardware/gen_options.py`](hardware/gen_options.py).
+
+[![Option C schematic rev 0](docs/images/schematic-option-c.png)](hardware/options/schematic-option-c.svg)
+
+[`docs/ALTERNATIVES.md`](docs/ALTERNATIVES.md) compares option C with option A (RT1062
+microcontroller, the fallback: [schematic](hardware/schematic.svg)) and option B
+(AX88772C only, key loaded by a factory fixture).
+
+## Factory programming
+
+Production is organised in runs, each with its own MAC block and unit quantity. The run
+logic (duplicate-free MAC allocation, reserve-before-write log, overlap and common-key
+checks) and the browser UI for the line are done and tested:
 
 ```sh
 host/tools/factory_ui.py --key-file nessum-common.key --log production-log.csv
@@ -34,78 +89,24 @@ host/tools/factory_ui.py --key-file nessum-common.key --log production-log.csv
 
 ![Production station UI](docs/images/factory-ui-pass.png)
 
-The tools need only Python 3 (`install -m 0755 host/tools/nessumctl.py /usr/local/bin/nessumctl`).
-See [`docs/MANAGEMENT.md`](docs/MANAGEMENT.md).
-
-> **Status:** Requirements, architecture, host-side integration and tools. The host
-> tools are tested against a protocol simulator. There is no schematic or adapter
-> firmware yet. The Nessum IC is selected (Socionext SC1320A), pending a price quote.
-> Open questions are in [`docs/SPECIFICATION.md` §9](docs/SPECIFICATION.md#9-open-questions).
-
-## At a glance
-
-| | |
-|---|---|
-| **Host** | TI AM62x, TI Processor SDK Linux. In-kernel `cdc_ncm` / `cdc_acm` + DWC3/AM62 USB host |
-| **Host interface** | USB 2.0 High-Speed (480 Mbit/s) device, USB-C or USB-A plug |
-| **Host view** | `eth2` (alt. name `nessum0`) + management console `/dev/nessum-mgmt` |
-| **MAC address** | Factory-programmed from the block defined for each production run, then locked. Duplicate-free allocation with an append-only log. |
-| **Network key** | One common key, factory-programmed, locked, write-only. Sealed with the MCU's chip-unique key. |
-| **Bridge MCU** | NXP i.MX RT1062 (Cortex-M7, on-chip USB HS PHY + 10/100 ENET with RMII, DCP crypto, HAB secure boot) |
-| **Nessum IC** | **Socionext SC1320A** (HD-PLC4, single 3.3 V, ~0.2 W, 7×7 QFN). Fallback: MegaChips MLKHN1501AM. See [spec §4.1](docs/SPECIFICATION.md#41-nessum-ic-selection). |
-| **MCU ↔ Nessum** | RMII MAC-to-MAC (no PHY), 100 Mbit/s; UART for Nessum configuration |
-| **Line side** | Existing RS-485 twisted pair **or** 24 V AC/DC cable. Coupling transformer + DC-blocking caps + TVS, 2-pin terminal block. SELV only, no mains. |
-| **Power** | USB bus-powered, ~0.9–1.4 W estimated (budget 2.5 W) |
-
-## Schematic
-
-[`hardware/schematic.svg`](hardware/schematic.svg) is the rev 0 (architecture-level) schematic:
-every part and net, with signal names but no pin numbers yet. The SC1320A pin names are
-placeholders until the datasheet is available. It is generated by
-[`hardware/gen_schematic.py`](hardware/gen_schematic.py).
-
-[![Schematic rev 0](docs/images/schematic.png)](hardware/schematic.svg)
-
-**Alternatives without a microcontroller:** option B (AX88772C USB-Ethernet bridge) and
-option C (USB hub + AX88772C + CP2102N USB-UART) remove the firmware work, but the key
-lock then depends on the SC1320A, and the MAC can't be locked. See
-[`docs/ALTERNATIVES.md`](docs/ALTERNATIVES.md) for the comparison and the questions
-that decide it.
-
-## Block diagram
-
-```
- ┌──────────── Linux host (TI AM62x) ──────────────────┐
- │  cdc_ncm ──► eth2   (eth0/eth1 = CPSW)              │
- │  cdc_acm ──► /dev/nessum-mgmt ◄── nessumctl         │
- └──────────────────────┬──────────────────────────────┘
-                        │ USB 2.0 HS
- ┌──────────────────────▼──────────────────────────────┐
- │  Bridge MCU (i.MX RT1062)                           │
- │   USB HS device ─ CDC-NCM ◄─► frame FIFO ◄─► ENET   │
- │   CDC-ACM mgmt ─ MAC / key / lock ─ sealed storage  │
- └───────────┬───────────────────────────┬─────────────┘
-       RMII  │ 50 MHz ref clk        UART │  RESET / GPIO
- ┌───────────▼───────────────────────────▼─────────────┐
- │  Nessum IC: Socionext SC1320A                       │
- └───────────────────────┬─────────────────────────────┘
-                         │ coupling xfmr + DC-block caps + TVS
-                    ═════╧═════  RS-485 twisted pair  |  24 V AC/DC cable
-```
+The tools' device backend currently speaks option A's protocol, and is exercised by a
+simulator. The **option C backend** is next. It reads the serial from the USB
+descriptors, writes the MAC and product strings into the AX88772C EEPROM, and loads and
+locks the common key over the SC1320A UART. It needs the SC1320A command set. See
+[`docs/ALTERNATIVES.md` §4](docs/ALTERNATIVES.md#4-factory-programming-changes-b-and-c).
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) | Requirements, architecture, IC selection, line interface, USB definition, open questions, plan |
-| [`docs/MANAGEMENT.md`](docs/MANAGEMENT.md) | MAC and network-key handling, factory lock, factory programming, console protocol, "standard Ethernet" obligations |
-| [`hardware/schematic.svg`](hardware/schematic.svg) | Rev 0 schematic (generated by `hardware/gen_schematic.py`) |
-| [`hardware/bom.csv`](hardware/bom.csv) | Preliminary bill of materials, same reference designators as the schematic |
-| [`docs/ALTERNATIVES.md`](docs/ALTERNATIVES.md) | Options B (AX88772C) and C (hub + AX88772C + CP2102N) without a microcontroller: comparison, security, decision questions |
-| [`hardware/options/`](hardware/options/) | Option B and C schematics (generated by `hardware/gen_options.py`) and BOMs |
-| [`firmware/README.md`](firmware/README.md) | Bridge-MCU firmware plan (USB, NCM ↔ ENET datapath, management, key sealing, secure boot) |
-| [`host/linux/`](host/linux/) | AM62x kernel config fragment, `.link` naming (`eth2`), udev rule, systemd-networkd config, bring-up check; `options-bc/` for options B/C |
-| [`host/tools/`](host/tools/) | `nessumctl.py`, `factory_program.py`, `factory_ui.py` + `factory_ui.html` (production UI), `fake_adapter.py` protocol simulator, tests |
+| [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) | Requirements, architecture (option C), IC selection, line interface, USB definition, open questions, plan |
+| [`docs/ALTERNATIVES.md`](docs/ALTERNATIVES.md) | Options A / B / C compared: drivers, link state, key and MAC lock, factory flow, Socionext decision questions |
+| [`hardware/options/`](hardware/options/) | **Option C** (selected) and option B schematics (`gen_options.py`) and BOMs |
+| [`hardware/schematic.svg`](hardware/schematic.svg), [`hardware/bom.csv`](hardware/bom.csv) | Option A (fallback) schematic (`gen_schematic.py`) and BOM |
+| [`host/linux/options-bc/`](host/linux/options-bc/) | **Option C** host files: `asix`/`cp210x` kernel config, udev naming (`eth2`, `/dev/nessum-mgmt`) |
+| [`host/linux/`](host/linux/) | networkd config for `eth2`, bring-up check; option A kernel/udev/`.link` files |
+| [`host/tools/`](host/tools/) | `factory_program.py` + `factory_ui.py`/`.html` (runs, log, UI), `nessumctl.py`, `fake_adapter.py` (option A protocol simulator), tests |
+| [`docs/MANAGEMENT.md`](docs/MANAGEMENT.md), [`firmware/README.md`](firmware/README.md) | Option A only: MCU console protocol, MAC/key lock, firmware plan |
 
 ## Tests
 

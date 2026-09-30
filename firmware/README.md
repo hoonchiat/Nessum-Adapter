@@ -1,5 +1,8 @@
 # Bridge-MCU firmware (plan)
 
+> **Option A (fallback) only.** The selected option C (USB hub + AX88772C + CP2102N) has
+> no microcontroller and no firmware. See [`../docs/ALTERNATIVES.md`](../docs/ALTERNATIVES.md).
+
 Target: NXP i.MX RT1062 (Cortex-M7), bare-metal or FreeRTOS, MCUXpresso SDK drivers.
 
 ## Components

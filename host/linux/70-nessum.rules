@@ -1,4 +1,5 @@
 # USB <-> Nessum adapter: management console symlink and permissions.
+# OPTION A (fallback, cdc_acm) only. Option C: options-bc/70-nessum-options-bc.rules.
 # Install to /etc/udev/rules.d/ and run: udevadm control --reload && udevadm trigger
 # The network interface name is set by 10-nessum.link (systemd) instead.
 #

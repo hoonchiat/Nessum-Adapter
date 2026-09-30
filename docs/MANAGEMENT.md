@@ -1,5 +1,12 @@
 # Adapter management: MAC address, network key, factory programming & console protocol
 
+> **Option A (fallback) only.** This document describes the RT1062 microcontroller
+> design: its console protocol, and the MCU-enforced MAC and key lock. The **selected
+> option C** has no microcontroller. Its MAC, key and factory flow are in
+> [ALTERNATIVES.md §3–4](ALTERNATIVES.md#3-security-with-one-common-network-key). The
+> production *run* rules (§3: blocks, quantities, reserve-before-write log, common-key
+> check) apply to option C unchanged.
+
 **Status:** Draft v0.3. The host tools in [`../host/tools/`](../host/tools/) implement this
 document: `nessumctl.py`, `factory_program.py`, and the reference simulator
 `fake_adapter.py`. The adapter firmware must match it.
