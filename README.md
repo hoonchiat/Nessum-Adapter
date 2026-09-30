@@ -92,8 +92,9 @@ host/tools/factory_ui.py --key-file nessum-common.key --log production-log.csv
 
 The **option C backend** ([`host/tools/optionc.py`](host/tools/optionc.py), the default)
 finds each unit by USB topology, writes the MAC into the AX88772C EEPROM and reads it
-back, and verifies it in hardware after the operator re-plugs the unit (PASS →
-re-plug → **VERIFIED**). Still pending before production: the SC1320A key/lock
+back, and verifies it in hardware after the operator re-plugs the unit (RE-PLUG TO
+VERIFY → **VERIFIED**). **Labels only after VERIFIED is enforced:** the station never
+reveals a MAC before verification, and won't program another unit while one is waiting. Still pending before production: the SC1320A key/lock
 commands (spec S4), and confirming the AX88772C EEPROM layout. Until the layout is
 confirmed the tools only run with `--engineering`. See
 [`docs/ALTERNATIVES.md` §4](docs/ALTERNATIVES.md#4-factory-programming-changes-b-and-c).

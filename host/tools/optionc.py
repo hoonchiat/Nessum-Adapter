@@ -239,6 +239,10 @@ class Sc1320aUart(NessumIc):
 class OptionCUnit:
     """One plugged-in option C adapter, driven by factory_program.program_unit()."""
 
+    # The MAC only takes effect after a power cycle, so it is not revealed (no label)
+    # until the station has verified it after the re-plug.
+    verify_after_replug = True
+
     def __init__(self, adapter, eeprom, nessum, engineering=False):
         self.adapter = adapter
         self.ax = Ax88772cEeprom(eeprom)

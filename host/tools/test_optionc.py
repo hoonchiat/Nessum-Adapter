@@ -171,6 +171,49 @@ class ProgramTest(Base):
         self.assertIn("read-back mismatch", msg)
 
 
+class CliVerifyTest(Base):
+    """factory_program.py for option C: no MAC printed until --verify confirms it."""
+
+    def setUp(self):
+        super().setUp()
+        self.sys.add_adapter(serial="CP0001")
+        self.backend_ = self.backend()
+
+    def test_program_hides_mac_then_verify_reveals(self):
+        rc, msg, res = self.program(backend=self.backend_)
+        self.assertEqual(rc, 0)
+        self.assertNotIn(res["mac"], msg)
+        self.assertIn("MAC hidden until verified", msg)
+        rc, msg = fp.verify_unit(self.backend_, self.log)   # not re-plugged yet
+        self.assertEqual(rc, 1)
+        self.assertNotIn(res["mac"], msg)
+        # That attempt is on record as failed; a correct re-plug later cannot overturn it.
+        self.sys.unplug()
+        self.sys.add_adapter(serial="CP0001")
+        fk.replug(self.sys, "1-1", "eth2", self.eeproms["eth2"])
+        rc, msg = fp.verify_unit(self.backend_, self.log)
+        self.assertEqual(rc, 1)
+        self.assertIn("already FAILED", msg)
+
+    def test_verify_after_replug(self):
+        _, _, res = self.program(backend=self.backend_)
+        self.sys.unplug()
+        self.sys.add_adapter(serial="CP0001")
+        fk.replug(self.sys, "1-1", "eth2", self.eeproms["eth2"])
+        rc, msg = fp.verify_unit(self.backend_, self.log)
+        self.assertEqual(rc, 0, msg)
+        self.assertIn(f"VERIFIED {res['mac']}", msg)
+        self.assertEqual(self.unit_rows()[-1]["status"], "verified")
+        rc, msg = fp.verify_unit(self.backend_, self.log)    # idempotent re-check, no new row
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.unit_rows()), 3)
+
+    def test_verify_unknown_unit(self):
+        rc, msg = fp.verify_unit(self.backend_, self.log)
+        self.assertEqual(rc, 2)
+        self.assertIn("no programmed record", msg)
+
+
 class StationTest(Base):
     """The browser-UI station with the option C backend, including the re-plug check."""
 
@@ -232,6 +275,61 @@ class StationTest(Base):
         self.chips["/dev/ttyUSB0"] = {}
         res = self.st.auto_step()
         self.assertEqual((res["outcome"], res["serial"], res["mac"]), ("ok", "CP0002", "00:50:c2:aa:00:01"))
+
+    # --- labelling rule: no MAC before VERIFIED ---------------------------------
+    def assert_no_mac_in_state(self, mac):
+        """The unit's MAC appears nowhere in the page data. The run's block string is
+        excluded: it is run configuration, and its first address is the first unit's."""
+        import json
+        st = self.st.state()
+        for r in st["runs"] + ([st["run"]] if st["run"] else []):
+            r.pop("block", None)
+        self.assertNotIn(mac, json.dumps(st))
+
+    def test_mac_not_revealed_before_verified(self):
+        res = self.st.program()
+        mac = res["mac"]
+        self.assert_no_mac_in_state(mac)          # tile, unit list: nowhere in the page data
+        st = self.st.state()
+        self.assertIsNone(st["last"]["mac"])
+        self.assertTrue(st["recent"][0]["awaiting"])
+        self.assertEqual(st["recent"][0]["detail"], "awaiting re-plug verification")
+        self.replug()
+        st = self.st.state()
+        self.assertEqual(st["last"]["mac"], mac)  # revealed once VERIFIED
+        self.assertEqual({r["mac"] for r in st["recent"]}, {mac})
+
+    def test_mac_never_revealed_when_verify_fails(self):
+        mac = self.st.program()["mac"]
+        self.replug(correct=False)
+        self.assert_no_mac_in_state(mac)
+
+    def test_no_other_unit_while_waiting(self):
+        self.st.program()
+        again = self.st.program()                  # manual Program: refused
+        self.assertEqual(again["outcome"], "blocked")
+        self.assertEqual(len([r for r in self.unit_rows() if r["status"] == "reserved"]), 1)
+        # A different unit plugged in: refused, the waiting unit is named.
+        self.sys.unplug()
+        self.st.auto_step()
+        self.sys.add_adapter(serial="CP0002")
+        self.st.auto = True
+        res = self.st.auto_step()
+        self.assertEqual(res["outcome"], "blocked")
+        self.assertIn("CP0001", res["message"])
+        self.assertEqual(len([r for r in self.unit_rows() if r["status"] == "reserved"]), 1)
+        with self.assertRaises(ValueError):
+            self.st.clear_run()
+
+    def test_mark_for_rework(self):
+        mac = self.st.program()["mac"]
+        self.st.abandon_verification()
+        self.assertEqual(self.unit_rows()[-1]["status"], "verify-failed")
+        self.assertIn("rework", self.unit_rows()[-1]["detail"])
+        self.assert_no_mac_in_state(mac)
+        self.assertFalse(self.st.state()["station"]["awaiting_replug"])
+        with self.assertRaises(ValueError):
+            self.st.abandon_verification()        # nothing waiting any more
 
     def test_state_shows_backend_and_warnings(self):
         st = self.st.state()["station"]

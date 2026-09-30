@@ -117,12 +117,30 @@ options. The **option C backend is implemented** in
 3. **First real-hardware run.** The ethtool EEPROM ioctls, discovery and udev helper
    are tested against a simulated `/sys` and EEPROM, not yet on a real AX88772C.
 
-Operator flow in the UI (option C): plug in → **PASS** (shows the MAC) → unplug and
-re-plug the same unit → **VERIFIED** → write the label → next unit. Auto mode programs
-each new unit once and verifies it when it comes back.
+**Labelling rule (enforced):** a unit's MAC goes on the label only after it is
+**VERIFIED** in hardware. The station enforces this on the server, not just on the page:
 
-![Option C: programmed, waiting for re-plug](images/factory-ui-c-pass.png)
-![Option C: verified after re-plug](images/factory-ui-c-verified.png)
+- **No MAC before VERIFIED:** after programming, the MAC is not sent to the browser at
+  all. The tile shows **RE-PLUG TO VERIFY**, and the unit list shows "hidden until
+  verified". It appears only on **VERIFIED**.
+- **One unit at a time:** while a unit waits for its re-plug, the station refuses to
+  program any other unit (the Program button is disabled, and the API refuses too). A
+  different adapter plugged in shows **RE-PLUG FIRST**, naming the waiting unit. The run
+  can't be closed until that unit is verified.
+- **Mark for rework:** if the unit can't be re-plugged, this button logs it as
+  `verify-failed` ("marked for rework"). Its MAC is never shown, the unit is set aside,
+  and the station is free again.
+- **Failed verification:** the MAC is never shown, including in the error message.
+- **Command line:** `factory_program.py` prints "MAC hidden until verified". After the
+  re-plug, `factory_program.py --verify --log …` checks the unit and prints the MAC only
+  when it is verified. A failed verification stays failed.
+
+Operator flow: plug in → **RE-PLUG TO VERIFY** → unplug and re-plug the same unit →
+**VERIFIED** (MAC shown) → write the label → next unit.
+
+![Option C: programmed, MAC hidden until re-plug](images/factory-ui-c-pass.png)
+![Option C: wrong unit plugged in while one is waiting](images/factory-ui-c-wrong-unit.png)
+![Option C: verified after re-plug, MAC shown for the label](images/factory-ui-c-verified.png)
 
 Host files for B/C: [`host/linux/options-bc/`](../host/linux/options-bc/).
 

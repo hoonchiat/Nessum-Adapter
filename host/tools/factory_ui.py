@@ -13,6 +13,11 @@ or --backend a (RT1062 console). With option C the station also checks, after th
 operator re-plugs a freshly programmed unit, that the MAC the kernel reports
 matches the programmed one (logged as 'verified' / 'verify-failed').
 
+Labelling rule (option C), enforced here and not just in the page: the MAC of a
+unit is never sent to the browser before it is VERIFIED, and no other unit can
+be programmed while one is waiting for its re-plug. "Mark for rework" logs the
+waiting unit as verify-failed (MAC never shown) and frees the station.
+
 The key file is read by this server and never sent to the browser. The page only
 sees the key fingerprint. The server listens on 127.0.0.1 only. Standard library
 only, like the other tools.
@@ -106,6 +111,8 @@ class Station:
 
     def clear_run(self):
         with self._mutex:
+            if self._pending_verify:
+                raise ValueError(self._replug_first_msg())
             self.run = None
             self.auto = False
             self.last = None
@@ -121,6 +128,8 @@ class Station:
                 return {"outcome": "error", "message": "already programming"}
             if not self.run:
                 return {"outcome": "error", "message": "select a production run first"}
+            if self._pending_verify:
+                return {"outcome": "blocked", "message": self._replug_first_msg()}
             self.busy = True
             run = dict(self.run)
         res = {}
@@ -145,6 +154,23 @@ class Station:
                 self._pending_verify = {"serial": res["serial"], "mac": res["mac"], "run": run["id"]}
         return res
 
+    def _replug_first_msg(self):
+        return (f"unit {self._pending_verify['serial']} is waiting for verification: re-plug it "
+                "first, or mark it for rework")
+
+    def abandon_verification(self):
+        """Operator gives up on the waiting unit: log verify-failed; its MAC is never shown."""
+        with self._mutex:
+            pv = self._pending_verify
+            if not pv:
+                raise ValueError("no unit is waiting for verification")
+            fp.append_log(self.log, run=pv["run"], status="verify-failed", mac=pv["mac"],
+                          serial=pv["serial"], key_fp=self.key_fp,
+                          detail="not re-plugged - marked for rework by the operator")
+            self._pending_verify = None
+            self.last = {"outcome": "failed", "serial": pv["serial"], "mac": None, "verified": False,
+                         "time": now(), "message": "Marked for rework: MAC not verified - do not label, set aside"}
+
     def verify_applied(self, serial):
         """Option C: after a re-plug, compare the MAC the kernel reports with the programmed one."""
         pv = self._pending_verify
@@ -153,8 +179,8 @@ class Station:
         res = {"outcome": "ok" if ok else "failed", "serial": serial, "mac": pv["mac"] if ok else None,
                "verified": ok, "time": now(),
                "message": "MAC verified in hardware" if ok else
-               f"MAC mismatch after re-plug: hardware reports {applied}, programmed {pv['mac']} "
-               "(check the EEPROM layout) - set this unit aside"}
+               f"MAC mismatch after re-plug: hardware reports {applied}, which differs from the "
+               "programmed MAC (check the EEPROM layout) - do not label, set this unit aside"}
         with self._mutex:
             self._pending_verify = None
             self.last = res
@@ -174,8 +200,13 @@ class Station:
         if serial is None:
             return None                 # not ready yet; try again next tick
         self._need_check = False
-        if self._pending_verify and serial == self._pending_verify["serial"]:
-            return self.verify_applied(serial)
+        if self._pending_verify:
+            if serial == self._pending_verify["serial"]:
+                return self.verify_applied(serial)
+            with self._mutex:   # a different unit: refuse until the waiting one is verified
+                self.last = {"outcome": "blocked", "serial": serial, "mac": None, "time": now(),
+                             "message": self._replug_first_msg()}
+            return self.last
         if not (self.auto and self.run):
             return None
         if serial == self.handled_serial:
@@ -203,7 +234,7 @@ class Station:
                             "log": os.path.abspath(self.log), "auto": self.auto, "busy": self.busy,
                             "lock_units": self.lock_units, "warnings": self.backend.warnings(),
                             "awaiting_replug": bool(self._pending_verify)},
-                "last": self.last,
+                "last": self._public_last(),
             }
         runs = self.known_runs(rows)
         st["runs"] = runs
@@ -215,15 +246,44 @@ class Station:
                        spare_addresses=max(0, run["last"] - next_int + 1),
                        complete=info["done"] >= run["quantity"])
             del run["first"], run["last"]
-            st["recent"] = [
+            st["recent"] = self._public_rows([
                 {k: r.get(k, "") for k in ("timestamp", "status", "mac", "serial", "detail")}
                 for r in rows if r["run"] == run["id"]
                 and r["status"] in fp.DONE + ("failed", "verified", "verify-failed")
-            ][-RECENT:][::-1]
+            ], rows)[-RECENT:][::-1]
         else:
             st["recent"] = []
         st["run"] = run
         return st
+
+
+    # --- labelling rule: no MAC leaves the server before it is verified (option C) ----
+    def _needs_verify(self):
+        return self.backend.name == "c"
+
+    def _public_last(self):
+        last = self.last
+        if last and self._needs_verify() and last.get("outcome") in ("ok", "already") \
+                and not last.get("verified"):
+            last = dict(last, mac=None)
+        return last
+
+    def _public_rows(self, recent, rows):
+        if not self._needs_verify():
+            return recent
+        verified = {(r["serial"], r["mac"]) for r in rows if r["status"] == "verified"}
+        pv = self._pending_verify
+        out = []
+        for r in recent:
+            r = dict(r, awaiting=False)
+            if r["status"] in fp.DONE and (r["serial"], r["mac"]) not in verified:
+                waiting = bool(pv) and (pv["serial"], pv["mac"]) == (r["serial"], r["mac"])
+                r.update(mac="", awaiting=waiting,
+                         detail="awaiting re-plug verification" if waiting else "not verified")
+            elif r["status"] == "verify-failed":
+                r["mac"] = ""
+            out.append(r)
+        return out
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -276,7 +336,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             elif self.path == "/api/program":
                 if not st.run:
                     raise ValueError("select a production run first")
+                if st._pending_verify:
+                    raise ValueError(st._replug_first_msg())
                 st.program()
+            elif self.path == "/api/verify/abandon":
+                st.abandon_verification()
             elif self.path == "/api/auto":
                 if body.get("on") and not st.run:
                     raise ValueError("select a production run first")

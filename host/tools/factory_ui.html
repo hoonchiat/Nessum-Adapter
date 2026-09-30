@@ -83,6 +83,7 @@
   table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 15px; }
   td { white-space: nowrap; } td:last-child { white-space: normal; }
   td.retired { text-decoration: line-through; color: var(--muted); }
+  td.hidden-mac { color: var(--muted); font-style: italic; font-family: inherit; }
   th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); }
   th { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
   td.st-ok { color: var(--pass); font-weight: 700; } td.st-fail { color: var(--fail); font-weight: 700; }
@@ -150,11 +151,13 @@
       </div>
       <div class="controls">
         <button class="primary big" id="programBtn" disabled>Program adapter</button>
+        <button id="reworkBtn" hidden>Mark for rework</button>
         <label class="switch"><input type="checkbox" id="autoSw"><span class="track"></span>
           Auto-program when an adapter is plugged in</label>
         <label class="switch"><input type="checkbox" id="soundSw" checked><span class="track"></span> Sound</label>
       </div>
-      <div class="hint" style="margin-top:10px">Shortcut: <kbd>Space</kbd> programs the adapter that is plugged in.</div>
+      <div class="hint" style="margin-top:10px">Shortcut: <kbd>Space</kbd> programs the adapter that is plugged in.
+        <span id="labelRule" hidden>· Write the label only when the screen shows <b>VERIFIED</b>: the MAC is not shown before.</span></div>
     </section>
 
     <section class="card">
@@ -214,6 +217,7 @@ const OUTCOME = {
   error:    ["fail", "ERROR"],
   already:  ["warn", "ALREADY PROGRAMMED"],
   complete: ["info", "RUN COMPLETE"],
+  blocked:  ["warn", "RE-PLUG FIRST"],
 };
 
 function setTile(cls, word, mac, sub, msg) {
@@ -230,8 +234,10 @@ function renderTile(s) {
     let [cls, word] = OUTCOME[last.outcome] || OUTCOME.error;
     let sub = last.serial ? "Serial " + last.serial : "";
     if (last.outcome === "ok" && st.awaiting_replug) {
-      word = "PASS";
-      sub += " · unplug and RE-PLUG this adapter to verify its MAC";
+      // Labelling rule: the server does not even send the MAC before verification.
+      return setTile("info", "RE-PLUG TO VERIFY", "",
+                     sub + " · programmed and locked · unplug and re-plug THIS adapter",
+                     "Do not label yet: the MAC appears here once it is VERIFIED in hardware.");
     } else if (last.outcome === "ok") {
       if (last.verified) word = "VERIFIED";
       sub += " · unplug it and insert the next adapter";
@@ -287,7 +293,9 @@ function render(s) {
     $("resumeBox").hidden = s.runs.length === 0;
   }
 
-  $("programBtn").disabled = !run || st.busy || !st.present || (run && run.complete);
+  $("programBtn").disabled = !run || st.busy || !st.present || (run && run.complete) || st.awaiting_replug;
+  $("reworkBtn").hidden = !st.awaiting_replug;
+  $("labelRule").hidden = st.backend !== "c";
   $("autoSw").checked = st.auto; $("autoSw").disabled = !run;
 
   const tb = $("recent"); tb.replaceChildren();
@@ -295,11 +303,13 @@ function render(s) {
     const ok = r.status !== "failed" && r.status !== "verify-failed";
     const label = !ok ? "FAIL" : r.status === "verified" ? "VERIFIED" : "PASS";
     const detail = r.status === "failed" ? "address retired · " + r.detail
-                 : r.status === "verify-failed" ? "MAC mismatch after re-plug · " + r.detail : r.status;
+                 : r.status === "verify-failed" ? "verification failed · " + r.detail : (r.detail || r.status);
     const tr = document.createElement("tr");
     tr.append(td(r.timestamp.replace("T", " ").replace("+00:00", "")),
               td(label, ok ? "st-ok" : "st-fail"),
-              td(r.mac, r.status === "failed" ? "mono retired" : "mono"), td(r.serial, "mono"), td(detail));
+              r.mac ? td(r.mac, r.status === "failed" ? "mono retired" : "mono")
+                    : td("hidden until verified", "hidden-mac"),
+              td(r.serial, "mono"), td(detail));
     tb.append(tr);
   }
   $("recentEmpty").hidden = s.recent.length > 0;
@@ -307,7 +317,7 @@ function render(s) {
   renderTile(s);
   if (s.last && s.last.time && lastSeen !== null && JSON.stringify(s.last) !== lastSeen) {
     if (s.last.outcome === "ok") beep(true);
-    else if (s.last.outcome === "failed" || s.last.outcome === "error") beep(false);
+    else if (["failed", "error", "blocked"].includes(s.last.outcome)) beep(false);
   }
   lastSeen = JSON.stringify(s.last);
 }
@@ -330,6 +340,10 @@ $("programBtn").onclick = () => {
   act("/api/program", {});
 };
 $("autoSw").onchange = (e) => act("/api/auto", {on: e.target.checked});
+$("reworkBtn").onclick = () => {
+  if (confirm("Mark the waiting unit for rework? It is logged as not verified, its MAC is never shown, and it must be set aside."))
+    act("/api/verify/abandon", {});
+};
 document.addEventListener("keydown", (e) => {
   if ((e.code === "Space" || e.code === "Enter") && !["INPUT", "BUTTON", "TEXTAREA"].includes(document.activeElement.tagName)) {
     e.preventDefault(); if (!$("programBtn").disabled) $("programBtn").click();

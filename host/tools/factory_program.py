@@ -286,7 +286,8 @@ def program_unit(unit, log, run, first, last, quantity, key, lock=True, force=Fa
     append_log(log, run=run, status="locked" if lock else "programmed", mac=mac, serial=serial, key_fp=key_fp)
     res["outcome"] = "ok"
     done = "programmed + locked" if lock else "programmed"
-    msg = f"{serial}: {mac}, key {key_fp}, {done} - run {run} unit {done_count + 1}/{quantity}"
+    shown = "MAC hidden until verified" if getattr(unit, "verify_after_replug", False) else mac
+    msg = f"{serial}: {shown}, key {key_fp}, {done} - run {run} unit {done_count + 1}/{quantity}"
     if note:
         res["note"] = note
         msg += f" - {note}"
@@ -304,6 +305,32 @@ def log_verification(log, run, serial, mac, key_fp, applied):
     append_log(log, run=run, status="verified" if ok else "verify-failed", mac=mac, serial=serial,
                key_fp=key_fp, detail="" if ok else f"hardware reports {applied}")
     return ok
+
+
+def verify_unit(backend, log):
+    """Option C, after the re-plug: check the MAC the hardware reports for the unit
+    that is plugged in against its latest programmed record. Returns (rc, message);
+    the MAC is only printed once it is verified (it goes on the label)."""
+    serial = backend.peek_serial()
+    if not serial:
+        return 2, "plug in exactly one adapter to verify"
+    rows = read_log(log)
+    done = [(i, r) for i, r in enumerate(rows) if r["serial"] == serial and r["status"] in DONE]
+    if not done:
+        return 2, f"{serial}: no programmed record in {log}"
+    i, rec = done[-1]
+    later = [r for r in rows[i + 1:] if r["serial"] == serial and r["mac"] == rec["mac"]
+             and r["status"] in ("verified", "verify-failed")]
+    if later and later[-1]["status"] == "verify-failed":
+        return 1, f"{serial}: verification already FAILED ({later[-1]['detail']}) - set aside, do not label"
+    applied = backend.applied_mac(serial)
+    if later:
+        ok = applied == rec["mac"]  # re-check only; already logged as verified
+    else:
+        ok = log_verification(log, rec["run"], serial, rec["mac"], rec["key_fp"], applied)
+    if ok:
+        return 0, f"{serial}: VERIFIED {rec['mac']} - write the label"
+    return 1, f"{serial}: VERIFY FAILED - hardware reports {applied} - set aside, do not label"
 
 
 def make_backend(args):
@@ -325,17 +352,30 @@ def add_backend_args(p):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     add_backend_args(p)
-    p.add_argument("--run", required=True, help="production run ID, e.g. R2026-10")
-    p.add_argument("--block", required=True,
+    p.add_argument("--verify", action="store_true",
+                   help="option C: after the re-plug, verify the unit's MAC in hardware "
+                        "(only needs --log); the MAC is printed only once verified")
+    p.add_argument("--run", help="production run ID, e.g. R2026-10")
+    p.add_argument("--block",
                    help="this run's MAC block: 'first-last' or 'base/prefixlen' (e.g. 00:50:c2:aa:00:00/39)")
-    p.add_argument("--quantity", type=int, required=True, help="number of units in this run")
-    p.add_argument("--key-file", required=True, help="the common Nessum network key as hex (mode 600)")
+    p.add_argument("--quantity", type=int, help="number of units in this run")
+    p.add_argument("--key-file", help="the common Nessum network key as hex (mode 600)")
     p.add_argument("--log", required=True, help="append-only CSV log shared by all runs")
     p.add_argument("--new-key", action="store_true",
                    help="allow a key different from earlier units (deliberate common-key change only)")
     p.add_argument("--no-lock", action="store_true", help="program without locking (e.g. engineering units)")
     p.add_argument("--force", action="store_true", help="replace an existing unlocked programmed address")
     args = p.parse_args(argv)
+
+    if args.verify:
+        if args.backend != "c":
+            p.error("--verify is for option C (option A verifies on the MCU)")
+        rc, msg = verify_unit(make_backend(args), args.log)
+        print(msg, file=sys.stdout if rc == 0 else sys.stderr)
+        return rc
+    missing = [n for n in ("run", "block", "quantity", "key_file") if getattr(args, n) is None]
+    if missing:
+        p.error("the following arguments are required: " + ", ".join("--" + m.replace("_", "-") for m in missing))
 
     try:
         first, last = parse_block(args.block)
