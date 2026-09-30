@@ -1,0 +1,27 @@
+name: CI
+
+# Host-side checks: nessumctl / factory_program tests against the protocol
+# simulator, and a shell syntax check of the bring-up script.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tools:
+    name: Host tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tool tests (against fake_adapter.py)
+        working-directory: host/tools
+        run: python3 -m unittest -v
+
+      - name: Shell syntax check
+        run: sh -n host/linux/check-adapter.sh

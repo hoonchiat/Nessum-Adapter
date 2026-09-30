@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Factory secrets and logs - never commit these
+*.key
+*-macs.csv
+station*.csv
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
