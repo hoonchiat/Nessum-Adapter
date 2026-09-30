@@ -1,0 +1,40 @@
+#!/bin/sh
+# nessum-udev-id - udev IMPORT{program} helper for the option C adapter.
+#
+# Usage (from a udev rule):  IMPORT{program}="/usr/local/lib/nessum/nessum-udev-id %p"
+#
+# Prints NESSUM_ADAPTER=1 (and NESSUM_HUB=<hub>) when the USB device that owns the
+# given sysfs devpath sits behind a non-root hub that carries BOTH an AX88772C
+# (0b95:772b) and a CP2102N (10c4:ea60), i.e. the on-board hub of an option C adapter.
+# This identifies the adapter by topology, so blank units need no custom USB strings.
+# Same rule as optionc.find_adapters() in host/tools.
+#
+# NESSUM_SYSFS overrides /sys (used by the tests).
+
+SYSFS="${NESSUM_SYSFS:-/sys}"
+p="$SYSFS$1"
+
+# Walk up from the net/tty device to the USB device that owns it.
+while [ "$p" != "$SYSFS" ] && [ "$p" != "/" ] && [ ! -f "$p/idVendor" ]; do
+  p=$(dirname "$p")
+done
+[ -f "$p/idVendor" ] || exit 0
+
+hub=$(dirname "$p")
+case "$(basename "$hub")" in usb*) exit 0 ;; esac   # root-hub port: not our hub
+[ -f "$hub/idVendor" ] || exit 0
+
+ax=0
+cp=0
+for c in "$hub"/*; do
+  [ -f "$c/idVendor" ] || continue
+  id="$(cat "$c/idVendor"):$(cat "$c/idProduct")"
+  [ "$id" = "0b95:772b" ] && ax=$((ax + 1))
+  [ "$id" = "10c4:ea60" ] && cp=$((cp + 1))
+done
+
+if [ "$ax" = 1 ] && [ "$cp" = 1 ]; then
+  echo "NESSUM_ADAPTER=1"
+  echo "NESSUM_HUB=$(basename "$hub")"
+fi
+exit 0

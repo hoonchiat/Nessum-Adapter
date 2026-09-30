@@ -25,9 +25,10 @@ recorded in the [spec §2](docs/SPECIFICATION.md#2-assumptions--clarifications):
   can't, the fallback is option A, the microcontroller design, which is kept in this repo.
 
 > **Status:** Requirements, architecture, rev 0 schematics for options A/B/C, host
-> integration, and the factory run/log logic and browser UI. There is no rev A schematic
-> yet. The option C factory backend is pending the SC1320A command set. Open questions
-> are in [`docs/SPECIFICATION.md` §9](docs/SPECIFICATION.md#9-open-questions).
+> integration, and factory tooling with the option C backend. There is no rev A
+> schematic yet. Still pending: the SC1320A key/lock commands (S4) and confirmation of
+> the AX88772C EEPROM layout. Open questions are in
+> [`docs/SPECIFICATION.md` §9](docs/SPECIFICATION.md#9-open-questions).
 
 ## At a glance
 
@@ -89,10 +90,12 @@ host/tools/factory_ui.py --key-file nessum-common.key --log production-log.csv
 
 ![Production station UI](docs/images/factory-ui-pass.png)
 
-The tools' device backend currently speaks option A's protocol, and is exercised by a
-simulator. The **option C backend** is next. It reads the serial from the USB
-descriptors, writes the MAC and product strings into the AX88772C EEPROM, and loads and
-locks the common key over the SC1320A UART. It needs the SC1320A command set. See
+The **option C backend** ([`host/tools/optionc.py`](host/tools/optionc.py), the default)
+finds each unit by USB topology, writes the MAC into the AX88772C EEPROM and reads it
+back, and verifies it in hardware after the operator re-plugs the unit (PASS →
+re-plug → **VERIFIED**). Still pending before production: the SC1320A key/lock
+commands (spec S4), and confirming the AX88772C EEPROM layout. Until the layout is
+confirmed the tools only run with `--engineering`. See
 [`docs/ALTERNATIVES.md` §4](docs/ALTERNATIVES.md#4-factory-programming-changes-b-and-c).
 
 ## Layout
@@ -105,7 +108,7 @@ locks the common key over the SC1320A UART. It needs the SC1320A command set. Se
 | [`hardware/schematic.svg`](hardware/schematic.svg), [`hardware/bom.csv`](hardware/bom.csv) | Option A (fallback) schematic (`gen_schematic.py`) and BOM |
 | [`host/linux/options-bc/`](host/linux/options-bc/) | **Option C** host files: `asix`/`cp210x` kernel config, udev naming (`eth2`, `/dev/nessum-mgmt`) |
 | [`host/linux/`](host/linux/) | networkd config for `eth2`, bring-up check; option A kernel/udev/`.link` files |
-| [`host/tools/`](host/tools/) | `factory_program.py` + `factory_ui.py`/`.html` (runs, log, UI), `nessumctl.py`, `fake_adapter.py` (option A protocol simulator), tests |
+| [`host/tools/`](host/tools/) | `factory_program.py` + `factory_ui.py`/`.html` (runs, log, UI), `optionc.py` (option C backend), `fake_optionc.py` / `fake_adapter.py` (simulators), `nessumctl.py` (option A), tests |
 | [`docs/MANAGEMENT.md`](docs/MANAGEMENT.md), [`firmware/README.md`](firmware/README.md) | Option A only: MCU console protocol, MAC/key lock, firmware plan |
 
 ## Tests

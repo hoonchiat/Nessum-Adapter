@@ -89,20 +89,40 @@ so a key read from any single unit exposes every installation.
 ## 4. Factory programming changes (B and C)
 
 The browser UI and the run/log logic (`factory_ui.py`, `factory_program.py`: runs,
-blocks, quantities, duplicate-free allocation, the common-key check) stay the same.
-Only the device backend changes:
+blocks, quantities, duplicate-free allocation, the common-key check) are shared by all
+options. The **option C backend is implemented** in
+[`host/tools/optionc.py`](../host/tools/optionc.py) and is the default (`--backend c`):
 
-| Step | Option A (today) | Options B / C |
+| Step | Option A | **Option C** (implemented) |
 |---|---|---|
-| Read serial number | `VERSION` over the MCU console | USB serial string (AX88772C EEPROM; CP2102N in C) |
-| Program MAC | `MAC SET` | Write the AX88772C EEPROM: ASIX SROM tool, or `ethtool -E eth2 magic 0xdeadbeef offset … value …` (layout per the AX88772C datasheet). Re-enumerate, then read back from sysfs. |
-| Program network key | `NKEY SET` (MCU seals it) | SC1320A UART command. B: over the fixture's USB-UART. C: over `/dev/nessum-mgmt`. **The command set is not yet known.** |
-| Verify key | Fingerprint from `NKEY GET` | Only if the SC1320A offers a fingerprint or check command, and never by reading the key back |
-| Lock | `LOCK` (MAC + key + pass-through) | SC1320A key lock (if it exists). No MAC lock. |
-| Strings for udev | USB descriptors in firmware | Write product string `Nessum Adapter` (AX88772C) and `Nessum Adapter Mgmt` (CP2102N) at the factory |
+| Find the unit | `/dev/nessum-mgmt` (MCU console) | **By USB topology:** a non-root hub carrying both an AX88772C (`0b95:772b`) and a CP2102N (`10c4:ea60`). Works on blank units. Exactly one must be plugged in. |
+| Read serial number | `VERSION` | CP2102N's factory-unique USB serial (sysfs) |
+| Program MAC | `MAC SET` | Written to the AX88772C EEPROM through the kernel's ethtool EEPROM ioctls (`asix` driver, standard library only, needs root), then **read back** |
+| Program network key | `NKEY SET` (MCU seals it) | `NessumIc.set_key` over the CP2102N → **pending the SC1320A command set (S4)** |
+| Verify key | Fingerprint from `NKEY GET` | `NessumIc.key_matches`: a fingerprint/check command, or a functional test against a golden node. Never by reading the key back. |
+| Lock | `LOCK` (MAC + key + pass-through) | `NessumIc.lock`, then `is_locked` checked → **pending S4**. No MAC lock. |
+| Apply / verify MAC | MCU `REBOOT` | The AX88772C loads its EEPROM at power-up, so the operator **re-plugs** the unit. The station compares the MAC the kernel then reports with the programmed one and logs `verified` or `verify-failed`. This also catches a wrong EEPROM layout. |
+| udev naming on the target | USB descriptors in firmware | **By topology** too ([`nessum-udev-id`](../host/linux/options-bc/nessum-udev-id)), so no custom USB strings need programming |
 
-The backend is not implemented yet, because it depends on the SC1320A command set. The
-UI would not change visibly apart from the fixture prompts in option B.
+**What is still open before production:**
+
+1. **SC1320A command set (S4).** `optionc.Sc1320aUart` is the only class to fill in
+   (`version`, `is_locked`, `set_key`, `key_matches`, `lock`). Until then it stops with
+   a clear message *before* any MAC is reserved, so no addresses are wasted.
+2. **AX88772C EEPROM layout.** The MAC offset (`optionc.LAYOUT`, currently 0x08 from
+   the AX88772-family map) and byte order must be confirmed against the AX88772C
+   datasheet, including whether a checksum must be updated. Until
+   `optionc.LAYOUT_VERIFIED` is set, the tools refuse to run unless `--engineering` is
+   given. The station shows this as a warning.
+3. **First real-hardware run.** The ethtool EEPROM ioctls, discovery and udev helper
+   are tested against a simulated `/sys` and EEPROM, not yet on a real AX88772C.
+
+Operator flow in the UI (option C): plug in → **PASS** (shows the MAC) → unplug and
+re-plug the same unit → **VERIFIED** → write the label → next unit. Auto mode programs
+each new unit once and verifies it when it comes back.
+
+![Option C: programmed, waiting for re-plug](images/factory-ui-c-pass.png)
+![Option C: verified after re-plug](images/factory-ui-c-verified.png)
 
 Host files for B/C: [`host/linux/options-bc/`](../host/linux/options-bc/).
 

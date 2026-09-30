@@ -9,6 +9,7 @@ Options B and C replace the i.MX RT1062 with fixed-function chips (see
 |---|---|
 | [`kernel.config`](kernel.config) | `asix` (AX88772C) and, for option C, `cp210x` (CP2102N) + the AM62x USB host |
 | [`70-nessum-options-bc.rules`](70-nessum-options-bc.rules) | Names the AX88772C `eth2`; option C: `/dev/nessum-mgmt` for the CP2102N |
+| [`nessum-udev-id`](nessum-udev-id) | Option C udev helper: recognises the adapter by USB topology (a hub carrying both the AX88772C and the CP2102N), so no custom USB strings are needed. Install to `/usr/local/lib/nessum/`. |
 
 The option A files still apply unchanged: [`../20-nessum.network`](../20-nessum.network)
 (networkd config for `eth2`). [`../10-nessum.link`](../10-nessum.link) and

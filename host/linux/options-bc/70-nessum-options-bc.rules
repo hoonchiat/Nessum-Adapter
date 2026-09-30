@@ -1,20 +1,26 @@
 # Options B and C: name the AX88772C "eth2" and (option C) give the CP2102N a
-# stable name. Install to /etc/udev/rules.d/ and run:
+# stable name. Install to /etc/udev/rules.d/ together with the helper:
+#   install -D -m 0755 nessum-udev-id /usr/local/lib/nessum/nessum-udev-id
 #   udevadm control --reload && udevadm trigger
 #
-# The in-kernel asix and cp210x drivers bind only to known VID:PIDs, so these
-# adapters keep the vendors' default IDs (ASIX 0b95:772b, Silicon Labs 10c4:ea60)
-# and are told apart from other ASIX / CP210x devices by the product string that
-# the factory writes into the AX88772C EEPROM and the CP2102N configuration.
-# (With your own VID:PID, the IDs would have to be added to the asix/cp210x
-# driver tables with a small kernel patch.)
-#
-# Numbered below 80 so the NAME wins over systemd's 80-net-setup-link.rules.
+# The in-kernel asix and cp210x drivers bind only to known VID:PIDs, so the
+# adapters keep the vendors' default IDs (ASIX 0b95:772b, Silicon Labs 10c4:ea60).
+# Numbered below 80 so NAME wins over systemd's 80-net-setup-link.rules.
 
+# --- Option C (selected): identify the adapter by USB topology --------------------
+# nessum-udev-id sets NESSUM_ADAPTER=1 when the device sits behind a hub that carries
+# both the AX88772C and the CP2102N, which works on units without custom USB strings.
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="asix", \
+  IMPORT{program}="/usr/local/lib/nessum/nessum-udev-id %p"
+SUBSYSTEM=="net", ACTION=="add", ENV{NESSUM_ADAPTER}=="1", NAME="eth2"
+
+SUBSYSTEM=="tty", KERNEL=="ttyUSB*", DRIVERS=="cp210x", \
+  IMPORT{program}="/usr/local/lib/nessum/nessum-udev-id %p"
+# Management serial port -> /dev/nessum-mgmt (root + netdev group).
+SUBSYSTEM=="tty", ENV{NESSUM_ADAPTER}=="1", SYMLINK+="nessum-mgmt", MODE="0660", GROUP="netdev"
+
+# --- Option B: no hub / CP2102N, so match the product string written into the
+# AX88772C EEPROM at the factory.
 SUBSYSTEM=="net", ACTION=="add", DRIVERS=="asix", \
   ATTRS{idVendor}=="0b95", ATTRS{idProduct}=="772b", ATTRS{product}=="Nessum Adapter", \
   NAME="eth2"
-
-# Option C only: management serial port -> /dev/nessum-mgmt (root + netdev group).
-SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", \
-  ATTRS{product}=="Nessum Adapter Mgmt", SYMLINK+="nessum-mgmt", MODE="0660", GROUP="netdev"

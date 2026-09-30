@@ -33,6 +33,7 @@
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
   .pill.on .dot { background: var(--pass); }
   .pill.warn { background: var(--warn-bg); color: var(--warn); border-color: transparent; font-weight: 600; }
+  #warns { display: contents; }
   .mono { font-family: var(--mono); }
   main { display: grid; grid-template-columns: 360px 1fr; gap: 20px; padding: 20px 24px; max-width: 1500px; margin: 0 auto; }
   @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } }
@@ -98,8 +99,10 @@
 <header>
   <h1>Nessum Adapter · Production Station</h1>
   <span class="pill" id="devPill"><span class="dot"></span><span id="devText">No adapter</span></span>
+  <span class="pill">Option <span id="backend">—</span></span>
   <span class="pill">Key <span class="mono" id="keyFp">—</span></span>
   <span class="pill warn" id="nolock" hidden>ENGINEERING MODE: units are NOT locked</span>
+  <span id="warns"></span>
 </header>
 
 <main>
@@ -130,6 +133,7 @@
       <dl class="kv">
         <dt>Block</dt><dd class="mono" id="rBlock"></dd>
         <dt>Failed</dt><dd id="rFailed"></dd>
+        <dt>Verify failed</dt><dd id="rVerifyFailed"></dd>
         <dt>Spare addresses</dt><dd id="rSpare"></dd>
       </dl>
       <button id="closeRun">Close run</button>
@@ -223,9 +227,15 @@ function renderTile(s) {
   if (!run) return setTile("", "SELECT RUN", "", "Start or resume a production run on the left.");
   if (st.busy) return setTile("info busy", "PROGRAMMING…", "", "Do not unplug the adapter.");
   if (last) {
-    const [cls, word] = OUTCOME[last.outcome] || OUTCOME.error;
+    let [cls, word] = OUTCOME[last.outcome] || OUTCOME.error;
     let sub = last.serial ? "Serial " + last.serial : "";
-    if (last.outcome === "ok") sub += " · unplug it and insert the next adapter";
+    if (last.outcome === "ok" && st.awaiting_replug) {
+      word = "PASS";
+      sub += " · unplug and RE-PLUG this adapter to verify its MAC";
+    } else if (last.outcome === "ok") {
+      if (last.verified) word = "VERIFIED";
+      sub += " · unplug it and insert the next adapter";
+    }
     if (last.outcome === "failed") sub += " · set this unit aside for rework";
     if (last.outcome === "already") sub += " · this unit is already done; unplug it";
     // A failed unit did NOT get its address (it was retired): never show it big.
@@ -246,6 +256,12 @@ function render(s) {
   $("devText").textContent = st.present ? "Adapter connected" : "No adapter";
   $("keyFp").textContent = st.key_fp;
   $("nolock").hidden = st.lock_units;
+  $("backend").textContent = (st.backend || "?").toUpperCase();
+  const warns = $("warns"); warns.replaceChildren();
+  for (const w of st.warnings || []) {
+    const pill = document.createElement("span"); pill.className = "pill warn"; pill.textContent = w;
+    warns.append(pill);
+  }
 
   const run = s.run;
   $("runNone").hidden = !!run; $("runActive").hidden = !run;
@@ -253,6 +269,7 @@ function render(s) {
     $("rId").textContent = run.id; $("rDone").textContent = run.done; $("rQty").textContent = run.quantity;
     $("rBar").style.width = Math.min(100, 100 * run.done / run.quantity) + "%";
     $("rBlock").textContent = run.block; $("rFailed").textContent = run.failed;
+    $("rVerifyFailed").textContent = run.verify_failed || 0;
     $("rSpare").textContent = run.spare_addresses;
     $("rSpare").style.color = run.spare_addresses < run.quantity - run.done ? "var(--fail)" : "";
   } else {
@@ -275,11 +292,14 @@ function render(s) {
 
   const tb = $("recent"); tb.replaceChildren();
   for (const r of s.recent) {
-    const ok = r.status !== "failed";
+    const ok = r.status !== "failed" && r.status !== "verify-failed";
+    const label = !ok ? "FAIL" : r.status === "verified" ? "VERIFIED" : "PASS";
+    const detail = r.status === "failed" ? "address retired · " + r.detail
+                 : r.status === "verify-failed" ? "MAC mismatch after re-plug · " + r.detail : r.status;
     const tr = document.createElement("tr");
     tr.append(td(r.timestamp.replace("T", " ").replace("+00:00", "")),
-              td(ok ? "PASS" : "FAIL", ok ? "st-ok" : "st-fail"),
-              td(r.mac, ok ? "mono" : "mono retired"), td(r.serial, "mono"), td(ok ? r.status : "address retired · " + r.detail));
+              td(label, ok ? "st-ok" : "st-fail"),
+              td(r.mac, r.status === "failed" ? "mono retired" : "mono"), td(r.serial, "mono"), td(detail));
     tb.append(tr);
   }
   $("recentEmpty").hidden = s.recent.length > 0;

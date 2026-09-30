@@ -259,10 +259,14 @@ Target: TI Processor SDK Linux on an **AM62x**. **No custom kernel driver.**
   [`../host/linux/20-nessum.network`](../host/linux/20-nessum.network). This is unchanged.
 - **Bring-up check:** [`../host/linux/check-adapter.sh`](../host/linux/check-adapter.sh)
   (handles `asix` and `cdc_ncm`).
-- **Tools:** the run/log logic and browser UI in [`../host/tools/`](../host/tools/) carry
-  over. Their device backend currently speaks option A's MCU protocol. The option C
-  backend (MAC into the AX88772C EEPROM, key over the SC1320A UART) is pending the
-  SC1320A command set (§9 S4, [ALTERNATIVES.md §4](ALTERNATIVES.md#4-factory-programming-changes-b-and-c)).
+- **Factory tools:** `factory_program.py` / `factory_ui.py` with the **option C backend**
+  ([`../host/tools/optionc.py`](../host/tools/optionc.py), default `--backend c`). It
+  finds the unit by USB topology, writes and reads back the MAC in the AX88772C EEPROM,
+  and verifies the MAC in hardware after a re-plug. Two parts are still pending: the
+  SC1320A key/lock commands (§9 S4) and confirmation of the EEPROM layout. See
+  [ALTERNATIVES.md §4](ALTERNATIVES.md#4-factory-programming-changes-b-and-c).
+- **udev helper:** [`../host/linux/options-bc/nessum-udev-id`](../host/linux/options-bc/nessum-udev-id)
+  recognises the adapter by topology for the `eth2` / `/dev/nessum-mgmt` rules.
 
 **Alternative if the host board can be changed:** the AM62x CPSW Ethernet switch
 supports RMII. Wiring the SC1320A straight to a spare CPSW port (fixed-link, no USB and
@@ -303,10 +307,10 @@ revisions. The USB adapter remains the plan for existing boards.
    UART. Verify `asix` → `eth2` on the AM62x and `iperf3` across a Nessum link.
 2. **Phase 1, schematic/layout rev A (option C).** Hub + AX88772C + CP2102N + SC1320A +
    AFE per vendor reference. Isolation and EMC review.
-3. **Phase 2, factory tooling.** Option C backend for `factory_program.py` /
-   `factory_ui.py`: serial from the USB descriptors, MAC into the AX88772C EEPROM,
-   product strings, common key over the SC1320A UART, SC1320A lock. The run/log/UI logic
-   is already done.
+3. **Phase 2, factory tooling.** The option C backend is implemented (discovery, EEPROM
+   MAC write + read-back, re-plug verification, UI). Remaining: implement
+   `Sc1320aUart` from the S4 command set, confirm the AX88772C EEPROM layout and set
+   `LAYOUT_VERIFIED`, and do a first run on real hardware.
 4. **Phase 3, validation.** Throughput/latency, hot-plug and suspend/resume on the host,
    key-lock verification (attempt read-back and change from the host), conducted
    emissions, safety pre-compliance.

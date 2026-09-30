@@ -8,6 +8,11 @@ checks and the append-only log stay exactly as tested in factory_program.py.
     factory_ui.py --key-file nessum-common.key --log production-log.csv
     # then open http://127.0.0.1:8080 in a browser on the same PC
 
+Backends as in factory_program.py: --backend c (default, hub + AX88772C + CP2102N)
+or --backend a (RT1062 console). With option C the station also checks, after the
+operator re-plugs a freshly programmed unit, that the MAC the kernel reports
+matches the programmed one (logged as 'verified' / 'verify-failed').
+
 The key file is read by this server and never sent to the browser. The page only
 sees the key fingerprint. The server listens on 127.0.0.1 only. Standard library
 only, like the other tools.
@@ -20,7 +25,6 @@ import json
 import os
 import sys
 import threading
-import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -38,8 +42,9 @@ def now():
 class Station:
     """Programming-station state shared by the HTTP handler and the auto loop."""
 
-    def __init__(self, device, key, log, lock_units=True):
-        self.device = device
+    def __init__(self, backend, key, log, lock_units=True):
+        # A plain path means an option A console (kept for existing callers/tests).
+        self.backend = fp.BackendA(backend) if isinstance(backend, str) else backend
         self.key = key
         self.key_fp = nessumctl.key_fingerprint(key)
         self.log = log
@@ -49,6 +54,7 @@ class Station:
         self.busy = False
         self.last = None         # last programming attempt, for the big result tile
         self.handled_serial = None
+        self._pending_verify = None  # option C: {serial, mac, run} until the unit is re-plugged
         self._need_check = True
         self._mutex = threading.Lock()
         self._log_cache = (None, [])
@@ -70,13 +76,16 @@ class Station:
             if r["status"] == "run-open":
                 block = r["detail"].split(";")[0].split("=", 1)[1]
                 qty = int(r["detail"].split(";")[1].split("=", 1)[1])
-                runs[r["run"]] = {"id": r["run"], "block": block, "quantity": qty, "done": 0, "failed": 0}
+                runs[r["run"]] = {"id": r["run"], "block": block, "quantity": qty, "done": 0, "failed": 0,
+                                  "verify_failed": 0}
         for r in rows:
             if r["run"] in runs:
                 if r["status"] in fp.DONE:
                     runs[r["run"]]["done"] += 1
                 elif r["status"] == "failed":
                     runs[r["run"]]["failed"] += 1
+                elif r["status"] == "verify-failed":
+                    runs[r["run"]]["verify_failed"] += 1
         return list(runs.values())
 
     # --- run selection -------------------------------------------------------
@@ -103,7 +112,7 @@ class Station:
 
     # --- programming ---------------------------------------------------------
     def present(self):
-        return os.path.exists(self.device)
+        return self.backend.present()
 
     def program(self):
         """Program the unit that is plugged in now. Returns the result dict."""
@@ -116,36 +125,60 @@ class Station:
             run = dict(self.run)
         res = {}
         try:
-            with nessumctl.Console(self.device) as con:
-                rc, msg = fp.program_one(con, self.log, run["id"], run["first"], run["last"],
-                                         run["quantity"], self.key, lock=self.lock_units, result=res)
-        except OSError as e:
-            res, msg = {"outcome": "error", "serial": None, "mac": None}, f"cannot open {self.device}: {e.strerror}"
-        except (nessumctl.ProtocolError, TimeoutError, ConnectionError) as e:
-            res["outcome"] = "error"
-            msg = f"adapter not responding correctly: {e}"
+            unit = self.backend.open_unit()
+        except fp.PREFLIGHT_ERRORS as e:
+            res, msg = {"outcome": "error", "serial": None, "mac": None}, f"adapter not ready: {e}"
+        else:
+            try:
+                rc, msg = fp.program_unit(unit, self.log, run["id"], run["first"], run["last"],
+                                          run["quantity"], self.key, lock=self.lock_units, result=res)
+            finally:
+                unit.close()
         res.update(message=msg, time=now())
         with self._mutex:
             self.busy = False
             self.last = res
             self.handled_serial = res.get("serial") or self.handled_serial
+            # The unit must disappear (unplug, or its REBOOT) before it is looked at again.
+            self._need_check = False
+            if res["outcome"] == "ok" and self.backend.name == "c":
+                self._pending_verify = {"serial": res["serial"], "mac": res["mac"], "run": run["id"]}
+        return res
+
+    def verify_applied(self, serial):
+        """Option C: after a re-plug, compare the MAC the kernel reports with the programmed one."""
+        pv = self._pending_verify
+        applied = self.backend.applied_mac(serial)
+        ok = fp.log_verification(self.log, pv["run"], serial, pv["mac"], self.key_fp, applied)
+        res = {"outcome": "ok" if ok else "failed", "serial": serial, "mac": pv["mac"] if ok else None,
+               "verified": ok, "time": now(),
+               "message": "MAC verified in hardware" if ok else
+               f"MAC mismatch after re-plug: hardware reports {applied}, programmed {pv['mac']} "
+               "(check the EEPROM layout) - set this unit aside"}
+        with self._mutex:
+            self._pending_verify = None
+            self.last = res
         return res
 
     def auto_step(self):
-        """One iteration of auto mode: program a newly inserted, not-yet-handled unit."""
+        """One loop tick: verify a re-plugged unit (option C), and in auto mode program a
+        newly inserted, not-yet-handled unit."""
         if not self.present():
             self._need_check = True     # unplugged (or re-enumerating after REBOOT)
             return None
-        if not (self.auto and self.run and not self.busy and self._need_check):
+        if self.busy or not self._need_check:
             return None
+        if not (self._pending_verify or (self.auto and self.run)):
+            return None
+        serial = self.backend.peek_serial()
+        if serial is None:
+            return None                 # not ready yet; try again next tick
         self._need_check = False
-        try:
-            with nessumctl.Console(self.device, timeout=2) as con:
-                serial = nessumctl.merged(con.command("VERSION")).get("serial")
-        except (OSError, nessumctl.ProtocolError, TimeoutError, ConnectionError):
-            self._need_check = True     # not ready yet; try again next tick
+        if self._pending_verify and serial == self._pending_verify["serial"]:
+            return self.verify_applied(serial)
+        if not (self.auto and self.run):
             return None
-        if serial and serial == self.handled_serial:
+        if serial == self.handled_serial:
             return None                 # same unit coming back after its REBOOT
         return self.program()
 
@@ -165,24 +198,27 @@ class Station:
         with self._mutex:
             run = dict(self.run) if self.run else None
             st = {
-                "station": {"device": self.device, "present": self.present(), "key_fp": self.key_fp,
+                "station": {"device": self.backend.describe(), "backend": self.backend.name,
+                            "present": self.present(), "key_fp": self.key_fp,
                             "log": os.path.abspath(self.log), "auto": self.auto, "busy": self.busy,
-                            "lock_units": self.lock_units},
+                            "lock_units": self.lock_units, "warnings": self.backend.warnings(),
+                            "awaiting_replug": bool(self._pending_verify)},
                 "last": self.last,
             }
         runs = self.known_runs(rows)
         st["runs"] = runs
         if run:
-            info = next((r for r in runs if r["id"] == run["id"]), {"done": 0, "failed": 0})
+            info = next((r for r in runs if r["id"] == run["id"]), {"done": 0, "failed": 0, "verify_failed": 0})
             used = [fp.mac_to_int(r["mac"]) for r in rows if r.get("mac") and r["run"] == run["id"]]
             next_int = (max(used) + 1) if used else run["first"]
-            run.update(done=info["done"], failed=info["failed"],
+            run.update(done=info["done"], failed=info["failed"], verify_failed=info["verify_failed"],
                        spare_addresses=max(0, run["last"] - next_int + 1),
                        complete=info["done"] >= run["quantity"])
             del run["first"], run["last"]
             st["recent"] = [
                 {k: r.get(k, "") for k in ("timestamp", "status", "mac", "serial", "detail")}
-                for r in rows if r["run"] == run["id"] and r["status"] in fp.DONE + ("failed",)
+                for r in rows if r["run"] == run["id"]
+                and r["status"] in fp.DONE + ("failed", "verified", "verify-failed")
             ][-RECENT:][::-1]
         else:
             st["recent"] = []
@@ -260,7 +296,7 @@ def make_server(station, port=8080):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("-d", "--device", default=os.environ.get("NESSUM_DEVICE", nessumctl.DEFAULT_DEVICE))
+    fp.add_backend_args(p)
     p.add_argument("--key-file", required=True, help="the common Nessum network key as hex (mode 600)")
     p.add_argument("--log", required=True, help="append-only CSV log shared by all runs")
     p.add_argument("--port", type=int, default=8080)
@@ -273,11 +309,14 @@ def main(argv=None):
         print(f"factory_ui: bad --key-file: {e}", file=sys.stderr)
         return 2
 
-    station = Station(args.device, key, args.log, lock_units=not args.no_lock)
+    station = Station(fp.make_backend(args), key, args.log, lock_units=not args.no_lock)
     stop = threading.Event()
     threading.Thread(target=station.auto_loop, args=(stop,), daemon=True).start()
     server = make_server(station, args.port)
-    print(f"Nessum production station: http://127.0.0.1:{args.port}  (key {station.key_fp}, Ctrl-C to stop)")
+    print(f"Nessum production station (option {station.backend.name.upper()}): "
+          f"http://127.0.0.1:{args.port}  (key {station.key_fp}, Ctrl-C to stop)")
+    for w in station.backend.warnings():
+        print(f"warning: {w}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

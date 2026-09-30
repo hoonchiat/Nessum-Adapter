@@ -20,6 +20,9 @@ Safety rules, all enforced from the append-only CSV log:
   * Every unit must get the same key (one common key). A key file whose fingerprint
     differs from earlier units is refused unless --new-key is given.
 
+Backends: ``--backend c`` (selected design: hub + AX88772C + CP2102N, see
+optionc.py) or ``--backend a`` (RT1062 MCU console protocol, see MANAGEMENT.md).
+
 Keep ONE log for all runs (back it up; it is the only record of used addresses).
 The key file holds the key as hex and must be mode 600. The log records only the
 key's fingerprint, never the key.
@@ -33,6 +36,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nessumctl  # noqa: E402
+import optionc  # noqa: E402
 
 LOG_FIELDS = ["timestamp", "run", "status", "mac", "serial", "key_fp", "detail"]
 DONE = ("locked", "programmed")
@@ -153,12 +157,89 @@ def next_address(rows, first, last):
     return None
 
 
-def program_one(con, log, run, first, last, quantity, key, lock=True, force=False, new_key=False,
-                result=None):
+# Errors that stop a unit before any address is reserved (nothing logged).
+PREFLIGHT_ERRORS = (nessumctl.ProtocolError, TimeoutError, ConnectionError, OSError,
+                    optionc.NotReady, NotImplementedError)
+# Errors during programming: the reserved address is retired.
+STEP_ERRORS = (nessumctl.ProtocolError, RuntimeError, TimeoutError, ConnectionError, OSError,
+               NotImplementedError)
+
+
+class McuUnit:
+    """Option A: one adapter reached through the RT1062 console (docs/MANAGEMENT.md)."""
+
+    def __init__(self, con):
+        self.con = con
+
+    def identify(self):
+        serial = nessumctl.merged(self.con.command("VERSION")).get("serial", "?")
+        info = nessumctl.merged(self.con.command("MAC GET"))
+        programmed = info.get("programmed", "none")
+        return {"serial": serial, "programmed": None if programmed == "none" else programmed,
+                "locked": info.get("locked") == "yes"}
+
+    def write_mac(self, mac):
+        self.con.command(f"MAC SET {mac}")
+        got = nessumctl.merged(self.con.command("MAC GET")).get("programmed")
+        if got != mac:
+            raise RuntimeError(f"read-back mismatch: {got}")
+
+    def write_key(self, key):
+        self.con.command(f"NKEY SET {key.hex()}")
+        if nessumctl.merged(self.con.command("NKEY GET")).get("fp") != nessumctl.key_fingerprint(key):
+            raise RuntimeError("network key fingerprint mismatch after write")
+
+    def lock(self):
+        self.con.command("LOCK")
+        if nessumctl.merged(self.con.command("MAC GET")).get("locked") != "yes":
+            raise RuntimeError("lock did not take effect")
+
+    def finish(self):
+        self.con.command("REBOOT")
+        return None
+
+    def close(self):
+        self.con.close()
+
+
+class BackendA:
+    """Station backend for option A: the MCU console at `device`."""
+
+    name = "a"
+
+    def __init__(self, device):
+        self.device = device
+
+    def warnings(self):
+        return []
+
+    def describe(self):
+        return self.device
+
+    def present(self):
+        return os.path.exists(self.device)
+
+    def peek_serial(self):
+        try:
+            with nessumctl.Console(self.device, timeout=2) as con:
+                return nessumctl.merged(con.command("VERSION")).get("serial")
+        except PREFLIGHT_ERRORS:
+            return None
+
+    def open_unit(self):
+        return McuUnit(nessumctl.Console(self.device))
+
+    def applied_mac(self, serial):
+        return None  # the MCU applies the MAC itself on REBOOT; nothing to re-check
+
+
+def program_unit(unit, log, run, first, last, quantity, key, lock=True, force=False, new_key=False,
+                 result=None):
     """Program one adapter's MAC and network key. Returns (exit_code, message).
 
-    If `result` is a dict it is filled with: outcome ('ok', 'already', 'complete',
-    'failed', 'error'), serial and mac - used by the production UI.
+    `unit` provides identify / write_mac / write_key / lock / finish (McuUnit for
+    option A, optionc.OptionCUnit for option C). If `result` is a dict it is filled
+    with: outcome ('ok', 'already', 'complete', 'failed', 'error'), serial and mac.
     """
     res = result if result is not None else {}
     res.update(outcome="error", serial=None, mac=None)
@@ -172,15 +253,17 @@ def program_one(con, log, run, first, last, quantity, key, lock=True, force=Fals
         res["outcome"] = "complete"
         return 1, f"run {run} is complete ({done_count}/{quantity} units) - nothing done"
 
-    ver = nessumctl.merged(con.command("VERSION"))
-    serial = res["serial"] = ver.get("serial", "?")
-    info = nessumctl.merged(con.command("MAC GET"))
+    try:
+        info = unit.identify()
+    except PREFLIGHT_ERRORS as e:
+        return 2, f"adapter not ready: {e}"
+    serial = res["serial"] = info["serial"]
 
-    if info.get("locked") == "yes":
-        res.update(outcome="already", mac=info.get("programmed"))
-        return 1, f"{serial}: already locked with {info.get('programmed')} - nothing done"
-    if info.get("programmed", "none") != "none" and not force:
-        res.update(outcome="already", mac=info.get("programmed"))
+    if info["locked"]:
+        res.update(outcome="already", mac=info["programmed"])
+        return 1, f"{serial}: already locked with {info['programmed']} - nothing done"
+    if info["programmed"] and not force:
+        res.update(outcome="already", mac=info["programmed"])
         return 1, f"{serial}: already programmed with {info['programmed']} (use --force to replace)"
 
     mac = next_address(read_log(log), first, last)
@@ -190,19 +273,12 @@ def program_one(con, log, run, first, last, quantity, key, lock=True, force=Fals
 
     append_log(log, run=run, status="reserved", mac=mac, serial=serial, key_fp=key_fp)
     try:
-        con.command(f"MAC SET {mac}")
-        check = nessumctl.merged(con.command("MAC GET"))
-        if check.get("programmed") != mac:
-            raise RuntimeError(f"read-back mismatch: {check.get('programmed')}")
-        con.command(f"NKEY SET {key.hex()}")
-        if nessumctl.merged(con.command("NKEY GET")).get("fp") != key_fp:
-            raise RuntimeError("network key fingerprint mismatch after write")
+        unit.write_mac(mac)
+        unit.write_key(key)
         if lock:
-            con.command("LOCK")
-            if nessumctl.merged(con.command("MAC GET")).get("locked") != "yes":
-                raise RuntimeError("lock did not take effect")
-        con.command("REBOOT")
-    except (nessumctl.ProtocolError, RuntimeError, TimeoutError, ConnectionError) as e:
+            unit.lock()
+        note = unit.finish()
+    except STEP_ERRORS as e:
         append_log(log, run=run, status="failed", mac=mac, serial=serial, key_fp=key_fp, detail=str(e))
         res["outcome"] = "failed"
         return 1, f"{serial}: FAILED programming {mac}: {e} (address retired, not reused)"
@@ -210,12 +286,45 @@ def program_one(con, log, run, first, last, quantity, key, lock=True, force=Fals
     append_log(log, run=run, status="locked" if lock else "programmed", mac=mac, serial=serial, key_fp=key_fp)
     res["outcome"] = "ok"
     done = "programmed + locked" if lock else "programmed"
-    return 0, f"{serial}: {mac}, key {key_fp}, {done} - run {run} unit {done_count + 1}/{quantity}"
+    msg = f"{serial}: {mac}, key {key_fp}, {done} - run {run} unit {done_count + 1}/{quantity}"
+    if note:
+        res["note"] = note
+        msg += f" - {note}"
+    return 0, msg
+
+
+def program_one(con, log, run, first, last, quantity, key, **kw):
+    """Option A convenience wrapper: program the unit behind an open MCU console."""
+    return program_unit(McuUnit(con), log, run, first, last, quantity, key, **kw)
+
+
+def log_verification(log, run, serial, mac, key_fp, applied):
+    """Record the post-replug check of the MAC the hardware actually reports."""
+    ok = applied == mac
+    append_log(log, run=run, status="verified" if ok else "verify-failed", mac=mac, serial=serial,
+               key_fp=key_fp, detail="" if ok else f"hardware reports {applied}")
+    return ok
+
+
+def make_backend(args):
+    if args.backend == "a":
+        return BackendA(args.device)
+    return optionc.BackendC(sysfs=args.sysfs, engineering=args.engineering)
+
+
+def add_backend_args(p):
+    p.add_argument("--backend", choices=("c", "a"), default="c",
+                   help="c = hub + AX88772C + CP2102N (selected design, default); a = RT1062 MCU")
+    p.add_argument("-d", "--device", default=os.environ.get("NESSUM_DEVICE", nessumctl.DEFAULT_DEVICE),
+                   help="option A: the MCU console tty")
+    p.add_argument("--engineering", action="store_true",
+                   help="option C: allow the not-yet-verified AX88772C EEPROM layout (engineering units)")
+    p.add_argument("--sysfs", default="/sys", help=argparse.SUPPRESS)
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("-d", "--device", default=os.environ.get("NESSUM_DEVICE", nessumctl.DEFAULT_DEVICE))
+    add_backend_args(p)
     p.add_argument("--run", required=True, help="production run ID, e.g. R2026-10")
     p.add_argument("--block", required=True,
                    help="this run's MAC block: 'first-last' or 'base/prefixlen' (e.g. 00:50:c2:aa:00:00/39)")
@@ -240,18 +349,19 @@ def main(argv=None):
         print(f"factory_program: bad --key-file: {e}", file=sys.stderr)
         return 2
 
+    backend = make_backend(args)
+    for w in backend.warnings():
+        print(f"factory_program: warning: {w}", file=sys.stderr)
     try:
-        con = nessumctl.Console(args.device)
-    except OSError as e:
-        print(f"factory_program: cannot open {args.device}: {e.strerror}", file=sys.stderr)
+        unit = backend.open_unit()
+    except PREFLIGHT_ERRORS as e:
+        print(f"factory_program: {e}", file=sys.stderr)
         return 2
-
-    with con:
-        try:
-            rc, msg = program_one(con, args.log, args.run, first, last, args.quantity, key,
-                                  lock=not args.no_lock, force=args.force, new_key=args.new_key)
-        except (nessumctl.ProtocolError, TimeoutError, ConnectionError) as e:
-            rc, msg = 2, f"adapter not responding correctly: {e}"
+    try:
+        rc, msg = program_unit(unit, args.log, args.run, first, last, args.quantity, key,
+                               lock=not args.no_lock, force=args.force, new_key=args.new_key)
+    finally:
+        unit.close()
     print(msg, file=sys.stdout if rc == 0 else sys.stderr)
     return rc
 

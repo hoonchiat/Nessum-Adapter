@@ -102,7 +102,7 @@ class UiTest(unittest.TestCase):
         self.req("POST", "/api/run/close", {})
         status, st = self.req("GET", "/api/state")
         self.assertIsNone(st["run"])
-        self.assertEqual(st["runs"], [{"id": "R1", "block": BLOCK, "quantity": 2, "done": 1, "failed": 0}])
+        self.assertEqual(st["runs"], [{"id": "R1", "block": BLOCK, "quantity": 2, "done": 1, "failed": 0, "verify_failed": 0}])
 
     def test_csrf_and_host_checks(self):
         status, _ = self.req("POST", "/api/program", {}, {"X-Station": ""})

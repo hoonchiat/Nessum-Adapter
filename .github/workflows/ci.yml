@@ -25,7 +25,9 @@ jobs:
         run: python3 -m unittest -v
 
       - name: Shell syntax check
-        run: sh -n host/linux/check-adapter.sh
+        run: |
+          sh -n host/linux/check-adapter.sh
+          sh -n host/linux/options-bc/nessum-udev-id
 
       - name: Schematic SVGs are up to date with their generators
         run: |
