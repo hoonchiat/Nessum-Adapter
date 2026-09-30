@@ -9,13 +9,14 @@ device, the stock `cdc_ncm` driver binds to it, and it appears as an ordinary Et
 interface with a MAC, MTU 1500, carrier and VLAN support. Existing networking software
 works unchanged, and no custom kernel driver is needed.
 
-Each unit's **Ethernet MAC (from your address block) and Nessum network key are
-programmed at the factory and then locked**. After that neither can be changed over USB,
+Each unit's **Ethernet MAC (from the address block of its production run) and the
+common Nessum network key are programmed at the factory and then locked**. After that neither can be changed over USB,
 and the key can never be read back.
 
 ```sh
-# Factory station: one adapter plugged in
-factory_program.py --block 00:50:c2:aa:00:00/36 --key-file kit42.key --log station1.csv
+# Factory station: once per adapter; each production run has its own MAC block and quantity
+factory_program.py --run R2026-10 --block 00:50:c2:aa:00:00-00:50:c2:aa:01:ff --quantity 500 \
+    --key-file nessum-common.key --log production-log.csv
 
 # In the field (read-only once locked)
 nessumctl mac get        # active MAC, locked=yes
@@ -38,8 +39,8 @@ See [`docs/MANAGEMENT.md`](docs/MANAGEMENT.md).
 | **Host** | TI AM62x, TI Processor SDK Linux. In-kernel `cdc_ncm` / `cdc_acm` + DWC3/AM62 USB host |
 | **Host interface** | USB 2.0 High-Speed (480 Mbit/s) device, USB-C or USB-A plug |
 | **Host view** | `eth2` (alt. name `nessum0`) + management console `/dev/nessum-mgmt` |
-| **MAC address** | Factory-programmed from your block, then locked. Duplicate-free allocation with an append-only log. |
-| **Network key** | Factory-programmed, locked, write-only. Sealed with the MCU's chip-unique key. |
+| **MAC address** | Factory-programmed from the block defined for each production run, then locked. Duplicate-free allocation with an append-only log. |
+| **Network key** | One common key, factory-programmed, locked, write-only. Sealed with the MCU's chip-unique key. |
 | **Bridge MCU** | NXP i.MX RT1062 (Cortex-M7, on-chip USB HS PHY + 10/100 ENET with RMII, DCP crypto, HAB secure boot) |
 | **Nessum IC** | **Socionext SC1320A** (HD-PLC4, single 3.3 V, ~0.2 W, 7×7 QFN). Fallback: MegaChips MLKHN1501AM. See [spec §4.1](docs/SPECIFICATION.md#41-nessum-ic-selection). |
 | **MCU ↔ Nessum** | RMII MAC-to-MAC (no PHY), 100 Mbit/s; UART for Nessum configuration |
@@ -83,3 +84,7 @@ See [`docs/MANAGEMENT.md`](docs/MANAGEMENT.md).
 ```sh
 cd host/tools && python3 -m unittest -v
 ```
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).

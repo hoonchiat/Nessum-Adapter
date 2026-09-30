@@ -1,6 +1,6 @@
 # USB 2.0 ↔ Nessum Adapter — Specification
 
-**Document status:** Draft v0.4 (AM62x host, `eth2`, factory-programmed and locked MAC + network key)
+**Document status:** Draft v0.5 (one common network key; MAC block and quantity per production run)
 **Last updated:** 2026-09-30
 
 ---
@@ -40,8 +40,8 @@ port through its USB 2.0 host port, without writing or maintaining a custom kern
 | **Host CPU** | **TI AM62x** (confirmed; Cortex-A53), TI Processor SDK Linux (arm64) | The adapter uses a standard USB class and the host driver is architecture-independent. The only SoC-specific part is the USB host controller: DWC3 with the AM62 glue (§8). |
 | **"Standard Ethernet port"** (requirement) | Linux sees an ordinary Ethernet netdev (`ARPHRD_ETHER`, MAC, MTU 1500, carrier, VLAN, multicast), so existing software runs unchanged | Met by CDC-NCM + the in-kernel `cdc_ncm` driver. The firmware obligations and the known differences from a PHY-based NIC are in [MANAGEMENT.md §5](MANAGEMENT.md#5-what-makes-it-look-like-a-standard-ethernet-port-to-linux). |
 | **Interface name** (confirmed) | `eth2` | Next after the AM62x CPSW's `eth0`/`eth1`. Alternative name `nessum0`. |
-| **MAC address** (confirmed) | Programmed **at the factory** from your own address block, then **locked** | `factory_program.py` assigns addresses without duplicates. After the lock, no change is possible over USB, persistent or runtime. See [MANAGEMENT.md §1, §3](MANAGEMENT.md#1-mac-addresses-in-the-adapter). |
-| **Nessum network key** (confirmed) | Programmed **at the factory**, then locked together with the MAC | Write-only over USB (only a fingerprint can be read). Sealed with the RT1062's chip-unique key. See [MANAGEMENT.md §2](MANAGEMENT.md#2-nessum-network-key). |
+| **MAC address** (confirmed) | Programmed **at the factory** from the address block you define **for each production run**, then **locked** | `factory_program.py` assigns addresses without duplicates. After the lock, no change is possible over USB, persistent or runtime. See [MANAGEMENT.md §1, §3](MANAGEMENT.md#1-mac-addresses-in-the-adapter). |
+| **Nessum network key** (confirmed) | **One common key** for all units, programmed **at the factory**, then locked together with the MAC | Write-only over USB (only a fingerprint can be read). Sealed with the RT1062's chip-unique key. Because one extracted key would expose every installation, secure boot and a locked SWD port are mandatory. See [MANAGEMENT.md §2](MANAGEMENT.md#2-nessum-network-key). |
 | **USB 2.0** | USB 2.0 **High-Speed** (480 Mbit/s) device | Full-Speed (12 Mbit/s) would bottleneck the link. |
 | **Nessum** | Nessum (formerly HD-PLC), IEEE 1901-2020 wavelet-OFDM | — |
 | **Medium** (confirmed) | **(a)** an existing **twisted pair currently carrying RS-485**, or **(b)** an existing **low-power 24 V AC or 24 V DC** cable | Both are SELV / low-voltage media, **not AC mains** (§6). Assumption: Nessum **replaces** RS-485 signalling on the pair. Sharing the pair with live RS-485 traffic is not planned (§6.1). |
@@ -263,7 +263,7 @@ revisions. The USB adapter remains the plan for existing boards.
 | # | Question | Impact |
 |---|---|---|
 | Q1 | ~~Host~~ Resolved: AM62x, interface `eth2`, MAC + network key factory-programmed and locked. Still open: TI SDK version, and which AM62x USB port (`usb0`/`usb1`) the adapter plugs into. | Device-tree `dr_mode` |
-| Q1b | Network-key scope: one key per kit/installation (recommended) or one for the whole product? What is your address block (base/size)? | Factory procedure ([MANAGEMENT.md §2](MANAGEMENT.md#2-nessum-network-key)) |
+| Q1b | ~~Key scope / MAC block~~ Resolved: **one common network key** for all units. MAC block and quantity are defined **per production run** (`factory_program.py --run/--block/--quantity`). | [MANAGEMENT.md §2–3](MANAGEMENT.md#2-nessum-network-key) |
 | Q1c | Key size and storage in the SC1320A (AES-128 assumed; does the IC have its own protected key storage?) | `NKEY_LEN`, key sealing design |
 | Q2 | ~~Medium~~ Resolved: RS-485 twisted pair or 24 V AC/DC cable. Still open: region, and cable lengths / number of nodes per cable. | EMC band plan, multi-hop need |
 | Q3 | ~~IC~~ Resolved: SC1320A selected (§4.1). Still open: Socionext quote at our volume, datasheet/NDA/SDK access, eval kit. | Final go/no-go on SC1320A vs MLKHN1501AM |

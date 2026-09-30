@@ -94,18 +94,23 @@ Residual exposure: the key crosses the on-board UART at boot, so an attacker wit
 open and a logic analyser could capture it. That is acceptable for this threat model,
 and noted.
 
-**Key scope: your decision.** Every node that must talk to another needs the same key:
+**Key scope (decided): one common key for all units.** Every adapter ever built gets the
+same key, so any unit can talk to any other with no per-site setup and no matched sets
+to ship.
 
-| Scheme | How | Trade-off |
-|---|---|---|
-| **Per kit / installation** (recommended) | Generate a new key for each set of units that ships to one site; program that batch with it | A leaked key exposes one site only. You must ship matched sets (log: serial ↔ key fingerprint). |
-| One key for the whole product | Same key in every unit | Simplest logistics, but one leaked key (e.g. from one opened unit) exposes every installation. Also, any customer's adapter can join any other customer's network. |
+What that choice means, and how the design compensates:
 
-Generating a key (the file must be mode 600, and should be kept in your secrets store,
-not in git):
+| Consequence | Mitigation |
+|---|---|
+| Anyone who extracts the key from **one** unit can decrypt and join **every** installation's Nessum network (with physical access to that wiring) | The key is never readable over USB. It is sealed with each MCU's chip-unique key, so copying the flash is useless. HAB secure boot, signed firmware and a fused-off/locked SWD port are **mandatory** in production (see `firmware/README.md`, Security). |
+| Any genuine adapter can join any site's network | Acceptable for field wiring that is physically private (RS-485 pair, 24 V cable). If a site needs isolation later, that requires a per-site key, i.e. an RMA reprogram. |
+| The key cannot be rotated in the field (units are locked) | Changing the common key means new units cannot talk to old ones. `factory_program.py` refuses a different key unless `--new-key` is given, so this can only happen deliberately. |
+| The key file at the factory is the crown jewel | Keep it in a secrets store and copy it to the programming station only for the run (mode 600, deleted afterwards). Never commit it: `*.key` is in `.gitignore`. |
+
+Generating the common key (once, ever):
 
 ```sh
-(umask 077; python3 -c 'import secrets; print(secrets.token_hex(16))' > kit42.key)
+(umask 077; python3 -c 'import secrets; print(secrets.token_hex(16))' > nessum-common.key)
 ```
 
 ---
@@ -113,37 +118,55 @@ not in git):
 ## 3. Factory programming
 
 [`../host/tools/factory_program.py`](../host/tools/factory_program.py) runs on the
-programming station, which can be the AM62x board itself or any Linux PC. Plug one adapter
-in and run:
+programming station, which can be the AM62x board itself or any Linux PC. Production is
+organised in **runs**. For each run you define an ID, the MAC address block for that run,
+and the number of units. Then run the script once per adapter:
 
 ```sh
-factory_program.py --block 00:50:c2:aa:00:00/36 --key-file kit42.key --log station1.csv
-# NSA0001234: 00:50:c2:aa:00:00, key 4179529caf32c8cc, programmed + locked (4095 left in block)
+factory_program.py --run R2026-10 \
+    --block 00:50:c2:aa:00:00-00:50:c2:aa:01:ff --quantity 500 \
+    --key-file nessum-common.key --log production-log.csv
+# NSA0001234: 00:50:c2:aa:00:00, key 4179529caf32c8cc, programmed + locked - run R2026-10 unit 1/500
 ```
+
+`--block` is `first-last` or `base/prefixlen`. Make it **somewhat larger than
+`--quantity`** so addresses retired by failed units don't stop the run.
 
 For each unit the script:
 
-1. Reads the unit's serial number (`VERSION`) and current state (`MAC GET`). It refuses
+1. Checks the run against the log (details below) and stops with
+   "run … is complete" once `--quantity` units have been programmed.
+2. Reads the unit's serial number (`VERSION`) and current state (`MAC GET`). It refuses
    units that are **already locked**, and units already programmed (unless `--force`).
-2. Picks the next free address in `--block`: one above the highest address ever
-   recorded in the log. `--block` is either `first-last` or `base/prefixlen`.
-3. **Writes a `reserved` row to the log and fsyncs it before touching the adapter.** A
+3. Picks the next free address in the run's block: one above the highest address ever
+   recorded in the log.
+4. **Writes a `reserved` row to the log and fsyncs it before touching the adapter.** A
    crash, unplug or power loss mid-way can therefore never lead to an address being
    handed out twice. An address whose programming fails is logged as `failed` and
    **retired, not reused**.
-4. `MAC SET` → reads back and verifies → `NKEY SET` → checks the key fingerprint →
+5. `MAC SET` → reads back and verifies → `NKEY SET` → checks the key fingerprint →
    `LOCK` → checks the lock → `REBOOT`.
-5. Logs `locked` together with the serial number and key fingerprint. The CSV is your
-   traceability record (serial ↔ MAC ↔ key fingerprint). It never contains the key.
+6. Logs `locked` with the run ID, serial number and key fingerprint. The CSV is your
+   traceability record (run ↔ serial ↔ MAC ↔ key fingerprint). It never contains the key.
 
-**One block per station.** If there are several programming stations, give each its own
-sub-block of your range (e.g. a /36 each) and its own log file. The script only knows
-about its own log. Back the logs up: they are the only record of which addresses are used.
+**Run checks** (from the log):
+
+| Check | Why |
+|---|---|
+| The first unit of a run records its block and quantity (`run-open` row). Later calls with a different block or quantity are refused. | Catches a typo halfway through a run |
+| A run's block must not overlap another run's block or any address another run used | No duplicate MACs across runs |
+| The block must hold at least `--quantity` addresses | Fails before the first unit, not the 400th |
+| The key fingerprint must match earlier units (unless `--new-key`) | One common key: a wrong key file would ship units that cannot talk to the rest |
+
+**Keep one log for all runs** and back it up: the overlap and key checks only see what is
+in that log. If a run is split across several programming stations, give each station its
+own sub-run (e.g. `R2026-10a`, `R2026-10b`) with a disjoint sub-block, then merge the logs
+into the master log afterwards.
 
 `--no-lock` is for engineering units only.
 
-The programming station is trusted: the key crosses USB in the clear once, at the factory.
-Keep key files on the station only for the duration of the batch.
+The programming station is trusted: the key crosses USB in the clear once per unit, at the
+factory.
 
 ---
 

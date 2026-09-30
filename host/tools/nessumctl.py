@@ -8,7 +8,7 @@ Examples:
     nessumctl mac get
     nessumctl mac set 00:50:c2:aa:bb:cc --apply
     nessumctl mac clear --apply
-    nessumctl key set --file kit42.key
+    nessumctl key set --file nessum-common.key
     nessumctl key status
     nessumctl lock
     nessumctl status

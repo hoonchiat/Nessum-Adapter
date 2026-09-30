@@ -33,8 +33,10 @@ interface (see [`../docs/MANAGEMENT.md §5`](../docs/MANAGEMENT.md#5-what-makes-
 - Production units run with **HAB secure boot** enabled (signed images only), and DFU
   accepts only signed images. Otherwise new firmware could bypass the lock or read out the
   network key.
-- Disable or permanently lock the SWD debug port with the RT1062 fuses in production, or
-  restrict it to the authenticated service routine. Pick one once the RMA process is defined.
+- **Mandatory** (all units share one network key, so one compromised unit exposes every
+  installation): disable or permanently lock the SWD debug port with the RT1062 fuses in
+  production, or restrict it to the authenticated service routine. Pick one once the RMA
+  process is defined.
 
 ## Datapath rules
 
