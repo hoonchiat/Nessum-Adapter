@@ -13,3 +13,6 @@ station*.csv
 .idea/
 *.swp
 .DS_Store
+
+# Firmware build output (incl. fetched deps)
+firmware/build/

@@ -1,8 +1,9 @@
 name: CI
 
-# Host-side checks: nessumctl / factory_program / factory_ui tests against the
-# protocol simulator, a shell syntax check of the bring-up script, and a check
-# that the committed schematic matches its generator.
+# Host-side checks: firmware core unit tests; nessumctl / factory_program /
+# factory_ui tests against the protocol simulator and the firmware's fwsim; shell
+# syntax checks; schematic SVGs vs their generators. Then the option A firmware
+# built for the Cortex-M7 (core, and the full RT1062 image linked).
 
 on:
   push:
@@ -20,7 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Tool tests (against fake_adapter.py)
+      - name: Firmware core unit tests
+        run: make -C firmware test
+
+      - name: Tool tests (against fake_adapter.py and the firmware's fwsim)
         working-directory: host/tools
         run: python3 -m unittest -v
 
@@ -28,9 +32,26 @@ jobs:
         run: |
           sh -n host/linux/check-adapter.sh
           sh -n host/linux/options-bc/nessum-udev-id
+          sh -n firmware/platform/rt1062/check/fetch-deps.sh
 
       - name: Schematic SVGs are up to date with their generators
         run: |
           python3 hardware/gen_schematic.py
           python3 hardware/gen_options.py
           git diff --exit-code hardware/
+
+  firmware-arm:
+    name: Firmware (Cortex-M7 build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arm-none-eabi-gcc
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Core for Cortex-M7
+        run: make -C firmware arm-check
+
+      - name: RT1062 image links (TinyUSB + MCUXpresso SDK, pinned)
+        run: make -C firmware rt1062-link
+

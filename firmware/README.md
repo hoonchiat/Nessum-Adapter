@@ -1,16 +1,45 @@
-# Bridge-MCU firmware (plan)
+# Bridge-MCU firmware
 
 > **Option A (fallback) only.** The selected option C (USB hub + AX88772C + CP2102N) has
 > no microcontroller and no firmware. See [`../docs/ALTERNATIVES.md`](../docs/ALTERNATIVES.md).
 
-Target: NXP i.MX RT1062 (Cortex-M7), bare-metal or FreeRTOS, MCUXpresso SDK drivers.
+Target: NXP i.MX RT1062 (Cortex-M7), bare-metal, MCUXpresso SDK drivers + TinyUSB.
 
-## Components
+## Status
+
+| Part | State |
+|---|---|
+| `core/` – console protocol, MAC store, key store, NTB16 framing, CRC/SHA-256 | Written and unit-tested on the host (`make test`). Compiles for Cortex-M7 (`make arm-check`). |
+| `platform/host/` + `fwsim` | The core on a PC, serving the console on a pty. `host/tools/test_firmware.py` checks it against `fake_adapter.py` (same replies), runs `nessumctl` and `factory_program` against it, and covers power cycles and storage / IC failures. |
+| `platform/rt1062/` | USB (NCM + ACM), ENET bridge, EEPROM, flash, DCP and UART drivers. **Builds and links (`make rt1062-link`), never run.** The board files are stand-ins and the SC1320A protocol is a placeholder. See [`platform/rt1062/README.md`](platform/rt1062/README.md). |
+| DFU, SWD service unlock, drop counters on the console | Not started. |
+
+```
+core/                 portable logic, no hardware access (platform.h is its only dependency)
+platform/host/        PC implementation of platform.h (simulated EEPROM/flash/seal/IC) + fwsim
+platform/rt1062/      the adapter
+tests/test_core.c     host unit tests
+```
+
+```sh
+make -C firmware test          # unit tests
+make -C firmware fwsim         # then: firmware/build/fwsim --state /tmp/unit1  (prints the pty)
+make -C firmware arm-check     # core for Cortex-M7, sizes
+make -C firmware rt1062-link   # whole image incl. TinyUSB + SDK (fetches pinned deps)
+```
+
+`fwsim` options: `--serial S`, `--default-mac MAC`, `--fail-eeprom-writes`,
+`--fail-keyblob-writes`, `--nessum-down`. With `--state DIR`, restarting it is a power cycle.
+
+**Host seal is not secure.** The host build's `plat_seal()` is an XOR stand-in that only
+models "bound to this device". Only the RT1062 DCP/OTPMK implementation protects the key.
+
+## Components (design)
 
 | Component | Responsibility |
 |---|---|
 | `usb/` | USB HS device stack (TinyUSB or the MCUXpresso USB stack). Composite descriptors: CDC-NCM + CDC-ACM (+ DFU later). |
-| `ncm/` | NTB16 parse (host→device) and build (device→host). Aggregates frames up to the negotiated NTB size, with a short aggregation timeout (~100 µs) to bound latency. |
+| `ncm/` | NTB16 parse (host→device) and build (device→host). A frame goes out at once when the IN endpoint is idle. While a transfer is in flight, frames gather in a second NTB, so there is no aggregation timer and no added latency. |
 | `enet/` | ENET MAC in RMII mode, fixed 100 Mbit/s full-duplex, no MDIO/PHY polling. Zero-copy DMA descriptor rings shared with the NCM layer where alignment allows. |
 | `nessum/` | Nessum IC control over UART: reset/boot sequencing, configuration, link-state polling or IRQ. Link state drives the NCM `NETWORK_CONNECTION` notification. |
 | `mgmt/` | CDC-ACM console protocol per [`../docs/MANAGEMENT.md`](../docs/MANAGEMENT.md): `VERSION`, `STATUS`, `MAC GET/SET/CLEAR`, `NKEY GET/SET`, `LOCK`, `REBOOT`, `NESSUM` pass-through. [`../host/tools/fake_adapter.py`](../host/tools/fake_adapter.py) is the executable reference for its behaviour. |

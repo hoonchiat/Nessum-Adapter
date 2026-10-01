@@ -228,7 +228,7 @@ in raw mode. The adapter **does not echo**.
 | `MAC GET` | `active=<mac> source=runtime\|programmed\|default default=<mac> programmed=<mac>\|none locked=yes\|no` | |
 | `MAC SET <mac>` | `programmed=<mac> apply=reboot` | Validates (§1.1), then writes both EEPROM copies and verifies them. Does **not** change `active` until reboot. Error 6 if locked. |
 | `MAC CLEAR` | `programmed=none apply=reboot` | Reverts to the default address. Error 6 if locked. |
-| `NKEY SET <hex>` | `fp=<fingerprint>` | Network key, exactly `NKEY_LEN` bytes, not all-zero (error 8). Sealed and stored (§2). Error 6 if locked. |
+| `NKEY SET <hex>` | `fp=<fingerprint>` | Network key, exactly `NKEY_LEN` bytes, not all-zero (error 8). Sealed and stored (§2). Error 6 if locked. Error 5 if it was stored but the Nessum IC did not take it (it is loaded again at every boot). |
 | `NKEY GET` | `set=yes\|no fp=<fingerprint>\|none len=<bytes>` | **Never** returns the key |
 | `LOCK` | `locked=yes` | Factory lock, one-way over USB (§1.2). Error 7 unless both the MAC and the key are programmed. |
 | `REBOOT` | — | Sends `OK`, then disconnects from USB within 100 ms and re-enumerates |
