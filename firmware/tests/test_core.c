@@ -11,6 +11,7 @@
 #include "macstore.h"
 #include "mgmt.h"
 #include "ncm.h"
+#include "nline.h"
 #include "util.h"
 
 static int g_fail, g_checks;
@@ -364,6 +365,57 @@ static void test_ncm(void)
     CHECK(parse(bad, n) == NCM_E_NDP);
 }
 
+/* ---------------------------------------------------------------- Nessum reply parser */
+static void feed(nline_t *p, const char *s)
+{
+    while (*s)
+        nline_rx(p, (uint8_t)*s++);
+}
+
+static void test_nline(void)
+{
+    nline_t p;
+    nline_reset(&p);
+    nline_rx(&p, 'x');                                    /* idle: ignored */
+    CHECK(nline_poll(&p, 0) == NL_IDLE);
+
+    nline_start(&p, 1000, 500);
+    feed(&p, "link=up rate=240");
+    CHECK(nline_poll(&p, 1499) == NL_BUSY);               /* partial line, not yet due */
+    feed(&p, " peers=1\r\nOK\r\n");
+    CHECK(nline_poll(&p, 1499) == NL_OK && p.count == 1);
+    CHECK(!strcmp(p.lines[0], "link=up rate=240 peers=1"));
+    feed(&p, "late\n");                                   /* after completion: ignored */
+    CHECK(p.count == 1);
+
+    nline_start(&p, 0, 500);
+    feed(&p, "ERR 3 no\n");
+    CHECK(nline_poll(&p, 1) == NL_ERR && p.count == 1 && !strcmp(p.lines[0], "ERR 3 no"));
+
+    nline_start(&p, 0, 500);
+    feed(&p, "OK\n");
+    CHECK(nline_poll(&p, 0) == NL_OK && p.count == 0);    /* bare OK */
+
+    nline_start(&p, 0xFFFFFF00u, 0x200);                  /* deadline wraps past 0 */
+    CHECK(nline_poll(&p, 0xFFFFFFF0u) == NL_BUSY);
+    CHECK(nline_poll(&p, 0x000000FFu) == NL_BUSY);
+    CHECK(nline_poll(&p, 0x00000100u) == NL_TIMEOUT);
+
+    nline_start(&p, 0, 500);                              /* excess lines dropped, still ends */
+    for (int i = 0; i < NLINE_MAX_LINES + 3; i++)
+        feed(&p, "l\n");
+    feed(&p, "OK\n");
+    CHECK(nline_poll(&p, 0) == NL_OK && p.count == NLINE_MAX_LINES);
+
+    nline_start(&p, 0, 500);                              /* overlong line truncated */
+    for (int i = 0; i < 300; i++)
+        nline_rx(&p, 'a');
+    feed(&p, "\nOK\n");
+    CHECK(p.state == NL_OK && strlen(p.lines[0]) == NESSUM_REPLY_MAX - 1);
+    nline_reset(&p);
+    CHECK(p.state == NL_IDLE && p.lines[0][0] == '\0');
+}
+
 int main(void)
 {
     test_util();
@@ -372,6 +424,7 @@ int main(void)
     test_keystore();
     test_mgmt();
     test_ncm();
+    test_nline();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -2,8 +2,8 @@
  * main.c - option A adapter firmware: USB (CDC-NCM + CDC-ACM) <-> ENET/RMII <-> SC1320A.
  *
  * Bare-metal superloop. TinyUSB events, the ENET receive ring, the console and the
- * Nessum link poll are all serviced here; only the USB interrupt (TinyUSB's event
- * queue) and SysTick run in interrupt context.
+ * Nessum link poll are all serviced here and none of them blocks. Interrupt context:
+ * USB (TinyUSB's event queue), the Nessum LPUART (byte rings) and SysTick.
  */
 #include "tusb.h"
 
@@ -18,7 +18,6 @@
 #include "usb_ncm.h"
 
 #define CONSOLE_ITF 0
-#define LINK_POLL_MS 500u
 #define CONSOLE_WAIT_MS 100u
 
 static macstore_t s_macs;
@@ -52,19 +51,20 @@ static void console_poll(void)
     }
 }
 
-/* The UART exchange blocks the loop for the IC's reply time (up to its 500 ms timeout
- * when the IC is silent, so then back off). TODO: interrupt-driven UART. */
 static void link_poll(void)
 {
-    static uint32_t last, interval = LINK_POLL_MS;
-    if (board_millis() - last < interval)
-        return;
-    last = board_millis();
-    uint32_t rate = 0, peers = 0;
-    bool answered = plat_nessum_link(&rate, &peers);
-    bool up = answered && peers > 0;
-    interval = answered ? LINK_POLL_MS : 10u * LINK_POLL_MS;
-    ncm_dev_set_link(up, up ? rate * 1000000u : 0);
+    bool up;
+    uint32_t bps;
+    if (plat_rt1062_link_poll(&up, &bps))
+        ncm_dev_set_link(up, bps);
+}
+
+/* While a synchronous Nessum command waits (console NESSUM, key load): keep the USB
+ * stack and the data path running. Not the console: it may be the caller. */
+void plat_rt1062_idle(void)
+{
+    tud_task();
+    enet_bridge_poll();
 }
 
 /* REBOOT: let the reply go out, then drop off the bus and come back, so Linux

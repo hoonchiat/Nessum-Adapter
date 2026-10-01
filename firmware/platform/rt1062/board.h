@@ -23,6 +23,8 @@
 
 /* SC1320A command UART and control lines */
 #define BOARD_NESSUM_UART LPUART3
+#define BOARD_NESSUM_UART_IRQn LPUART3_IRQn
+#define BOARD_NESSUM_UART_IRQHandler LPUART3_IRQHandler
 #define BOARD_NESSUM_BAUD 115200u   /* TBD from the SC1320A datasheet (S4) */
 #define BOARD_NESSUM_RST_GPIO GPIO1
 #define BOARD_NESSUM_RST_PIN 18u    /* TBD: PCB */

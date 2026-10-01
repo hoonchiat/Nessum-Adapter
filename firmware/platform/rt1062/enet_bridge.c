@@ -25,6 +25,7 @@ static enet_frame_info_t s_tx_info[TX_BD];
 static uint8_t s_frame[BUF_SIZE];   /* the frame waiting for room on the USB side */
 static uint32_t s_frame_len;
 static enet_bridge_stats_t s_stats;
+static bool s_ready;
 
 const enet_bridge_stats_t *enet_bridge_stats(void) { return &s_stats; }
 
@@ -63,6 +64,7 @@ bool enet_bridge_init(const uint8_t mac[6])
     if (ENET_Init(ENET, &s_handle, &cfg, &buf, addr, CLOCK_GetFreq(kCLOCK_IpgClk)) != kStatus_Success)
         return false;
     ENET_ActiveRead(ENET);
+    s_ready = true;
     return true;
 }
 
@@ -86,6 +88,8 @@ bool ncm_dev_from_host(const uint8_t *frame, size_t len)
 
 void enet_bridge_poll(void)
 {
+    if (!s_ready)   /* also called while boot-time Nessum commands wait */
+        return;
     for (int budget = RX_BD; budget > 0; budget--) {
         if (s_frame_len) {                       /* waiting for the USB side */
             if (!ncm_dev_active()) {

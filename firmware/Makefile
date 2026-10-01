@@ -15,7 +15,7 @@ WARN     = -std=c11 -Wall -Wextra -Werror -Wshadow -Wstrict-prototypes
 INC      = -Icore -Iplatform/host
 BUILD    = build
 
-CORE     = core/util.c core/macstore.c core/keystore.c core/mgmt.c core/ncm.c
+CORE     = core/util.c core/macstore.c core/keystore.c core/mgmt.c core/ncm.c core/nline.c
 HOST     = platform/host/host_platform.c
 HDRS     = $(wildcard core/*.h platform/host/*.h)
 

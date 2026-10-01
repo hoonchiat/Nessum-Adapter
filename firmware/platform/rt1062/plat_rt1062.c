@@ -4,7 +4,7 @@
  *   EEPROM    24AA02E48 on LPI2C (page writes + acknowledge polling)
  *   key blob  last QSPI sector, via the boot ROM's FlexSPI NOR API
  *   sealing   DCP AES-128 with the OTP master key (OTPMK) - see "Sealing" below
- *   Nessum    SC1320A command UART (LPUART) and reset line
+ *   Nessum    SC1320A command UART (nessum_uart.c, interrupt-driven) and reset line
  *
  * The SC1320A command set is not yet known (docs/SPECIFICATION.md §9, S4). The
  * line protocol below - "<cmd>\r\n", reply lines ending in "OK" or "ERR ..." - and
@@ -18,8 +18,9 @@
 #include "fsl_dcp.h"
 #include "fsl_iomuxc.h"
 #include "fsl_lpi2c.h"
-#include "fsl_lpuart.h"
 #include "fsl_romapi.h"
+#include "nessum_uart.h"
+#include "nline.h"
 #include "platform.h"
 #include "plat_rt1062.h"
 #include "util.h"
@@ -155,47 +156,64 @@ static bool dcp_crypt(bool encrypt, const uint8_t *in, uint8_t *out, size_t len)
 bool plat_seal(const uint8_t *in, uint8_t *out, size_t len) { return dcp_crypt(true, in, out, len); }
 bool plat_unseal(const uint8_t *in, uint8_t *out, size_t len) { return dcp_crypt(false, in, out, len); }
 
-/* ---------------------------------------------------------------- Nessum IC (PLACEHOLDER protocol) */
-static bool uart_getc(uint8_t *c, uint32_t deadline)
+/* ---------------------------------------------------------------- Nessum IC (PLACEHOLDER protocol)
+ * One transaction at a time on the UART: either the background link poll (driven by
+ * plat_rt1062_link_poll from the main loop, never waits) or a synchronous command
+ * (console NESSUM / STATUS, key load, version). A synchronous command keeps USB and
+ * the ENET serviced through plat_rt1062_idle() while it waits for the reply. */
+#define NESSUM_TIMEOUT_MS 500u
+#define LINK_POLL_MS 500u
+
+static nline_t s_nl;
+static enum { OWNER_NONE, OWNER_LINK, OWNER_SYNC } s_owner;
+
+static bool nessum_begin(const char *cmd)
 {
-    while ((int32_t)(deadline - board_millis()) > 0) {
-        if (LPUART_GetStatusFlags(BOARD_NESSUM_UART) & kLPUART_RxDataRegFullFlag) {
-            *c = LPUART_ReadByte(BOARD_NESSUM_UART);
-            return true;
-        }
-    }
-    return false;
+    char line[8 + 2 * 32 + 3];   /* the longest command: KEY SET <64 hex> */
+    size_t n = strlen(cmd);
+    if (n + 2 > sizeof line)
+        return false;
+    memcpy(line, cmd, n);
+    line[n++] = '\r';
+    line[n++] = '\n';
+    nessum_uart_flush_rx();   /* drop stale or unsolicited output */
+    bool ok = nessum_uart_write(line, n);
+    secure_zero(line, sizeof line);
+    if (ok)
+        nline_start(&s_nl, board_millis(), NESSUM_TIMEOUT_MS);
+    return ok;
+}
+
+static nl_state_t nessum_pump(void)
+{
+    uint8_t c;
+    while (nessum_uart_getc(&c))
+        nline_rx(&s_nl, c);
+    return nline_poll(&s_nl, board_millis());
 }
 
 int plat_nessum_command(const char *cmd, char reply[][NESSUM_REPLY_MAX], int max_lines)
 {
-    LPUART_ClearStatusFlags(BOARD_NESSUM_UART, kLPUART_RxOverrunFlag);
-    if (LPUART_WriteBlocking(BOARD_NESSUM_UART, (const uint8_t *)cmd, strlen(cmd)) != kStatus_Success ||
-        LPUART_WriteBlocking(BOARD_NESSUM_UART, (const uint8_t *)"\r\n", 2) != kStatus_Success)
+    /* Let a background link poll finish first; its result is dropped (it retries). */
+    while (s_owner == OWNER_LINK && nessum_pump() == NL_BUSY)
+        plat_rt1062_idle();
+    s_owner = OWNER_NONE;
+    if (!nessum_begin(cmd))
         return -1;
-    uint32_t deadline = board_millis() + 500u;
-    char line[NESSUM_REPLY_MAX];
-    size_t n = 0;
-    int lines = 0;
-    uint8_t c;
-    while (uart_getc(&c, deadline)) {
-        if (c == '\r')
-            continue;
-        if (c != '\n') {
-            if (n < sizeof line - 1)
-                line[n++] = (char)c;
-            continue;
-        }
-        line[n] = '\0';
-        n = 0;
-        if (!strcmp(line, "OK"))
-            return lines;
-        if (lines < max_lines)
-            snprintf(reply[lines++], NESSUM_REPLY_MAX, "%s", line);
-        if (!strncmp(line, "ERR", 3))
-            return lines;
+    s_owner = OWNER_SYNC;
+    nl_state_t st;
+    while ((st = nessum_pump()) == NL_BUSY)
+        plat_rt1062_idle();
+    s_owner = OWNER_NONE;
+
+    int lines = -1;   /* no complete answer in time */
+    if (st == NL_OK || st == NL_ERR) {
+        lines = s_nl.count < max_lines ? s_nl.count : max_lines;
+        for (int i = 0; i < lines; i++)
+            memcpy(reply[i], s_nl.lines[i], NESSUM_REPLY_MAX);
     }
-    return -1;   /* no complete answer in time */
+    nline_reset(&s_nl);
+    return lines;
 }
 
 bool plat_nessum_load_key(const uint8_t *key, size_t len)
@@ -215,19 +233,51 @@ bool plat_nessum_load_key(const uint8_t *key, size_t len)
     return r == 0;   /* bare "OK" */
 }
 
+/* "link=<up|down> rate=<Mbit/s> peers=<n>" */
+static bool parse_status(const char *line, bool *up, uint32_t *rate_mbps, uint32_t *peers)
+{
+    unsigned rate = 0, n = 0;
+    char state[8] = "";
+    if (sscanf(line, "link=%7s rate=%u peers=%u", state, &rate, &n) != 3)
+        return false;
+    *up = !strcmp(state, "up");
+    *rate_mbps = rate;
+    *peers = n;
+    return true;
+}
+
 bool plat_nessum_link(uint32_t *rate_mbps, uint32_t *peers)
 {
     char reply[2][NESSUM_REPLY_MAX];
-    unsigned rate = 0, n = 0;
-    char state[8] = "";
+    bool up = false;
     *rate_mbps = 0;
     *peers = 0;
-    if (plat_nessum_command("STATUS", reply, 2) < 1 ||
-        sscanf(reply[0], "link=%7s rate=%u peers=%u", state, &rate, &n) != 3)
+    return plat_nessum_command("STATUS", reply, 2) >= 1 && parse_status(reply[0], &up, rate_mbps, peers) && up;
+}
+
+bool plat_rt1062_link_poll(bool *up, uint32_t *bps)
+{
+    static uint32_t last, interval = LINK_POLL_MS;
+    if (s_owner == OWNER_LINK) {
+        nl_state_t st = nessum_pump();
+        if (st == NL_BUSY)
+            return false;
+        s_owner = OWNER_NONE;
+        bool link = false;
+        uint32_t rate = 0, peers = 0;
+        bool answered = st == NL_OK && s_nl.count >= 1 && parse_status(s_nl.lines[0], &link, &rate, &peers);
+        nline_reset(&s_nl);
+        interval = answered ? LINK_POLL_MS : 10u * LINK_POLL_MS;   /* back off while the IC is silent */
+        *up = answered && link && peers > 0;
+        *bps = *up ? rate * 1000000u : 0;
+        return true;
+    }
+    if (s_owner != OWNER_NONE || board_millis() - last < interval)
         return false;
-    *rate_mbps = rate;
-    *peers = n;
-    return !strcmp(state, "up");
+    last = board_millis();
+    if (nessum_begin("STATUS"))
+        s_owner = OWNER_LINK;
+    return false;
 }
 
 const char *plat_nessum_version(void) { return s_nessum_version; }
@@ -254,12 +304,7 @@ void plat_rt1062_init(void)
     i2c.baudRate_Hz = BOARD_EEPROM_I2C_HZ;
     LPI2C_MasterInit(BOARD_EEPROM_I2C, &i2c, board_lpi2c_clock_hz());
 
-    lpuart_config_t uart;
-    LPUART_GetDefaultConfig(&uart);
-    uart.baudRate_Bps = BOARD_NESSUM_BAUD;
-    uart.enableTx = true;
-    uart.enableRx = true;
-    LPUART_Init(BOARD_NESSUM_UART, &uart, board_lpuart_clock_hz());
+    nessum_uart_init(BOARD_NESSUM_BAUD, board_lpuart_clock_hz());
 
     dcp_config_t dcp;
     DCP_GetDefaultConfig(&dcp);

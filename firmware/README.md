@@ -9,9 +9,9 @@ Target: NXP i.MX RT1062 (Cortex-M7), bare-metal, MCUXpresso SDK drivers + TinyUS
 
 | Part | State |
 |---|---|
-| `core/` – console protocol, MAC store, key store, NTB16 framing, CRC/SHA-256 | Written and unit-tested on the host (`make test`). Compiles for Cortex-M7 (`make arm-check`). |
+| `core/` – console protocol, MAC store, key store, NTB16 framing, Nessum reply parser, CRC/SHA-256 | Written and unit-tested on the host (`make test`). Compiles for Cortex-M7 (`make arm-check`). |
 | `platform/host/` + `fwsim` | The core on a PC, serving the console on a pty. `host/tools/test_firmware.py` checks it against `fake_adapter.py` (same replies), runs `nessumctl` and `factory_program` against it, and covers power cycles and storage / IC failures. |
-| `platform/rt1062/` | USB (NCM + ACM), ENET bridge, EEPROM, flash, DCP and UART drivers. **Builds and links (`make rt1062-link`), never run.** The board files are stand-ins and the SC1320A protocol is a placeholder. See [`platform/rt1062/README.md`](platform/rt1062/README.md). |
+| `platform/rt1062/` | USB (NCM + ACM), ENET bridge, EEPROM, flash, DCP and interrupt-driven UART drivers. **Builds and links (`make rt1062-link`), never run.** The board files are stand-ins and the SC1320A protocol is a placeholder. See [`platform/rt1062/README.md`](platform/rt1062/README.md). |
 | DFU, SWD service unlock, drop counters on the console | Not started. |
 
 ```
@@ -41,7 +41,7 @@ models "bound to this device". Only the RT1062 DCP/OTPMK implementation protects
 | `usb/` | USB HS device stack (TinyUSB or the MCUXpresso USB stack). Composite descriptors: CDC-NCM + CDC-ACM (+ DFU later). |
 | `ncm/` | NTB16 parse (host→device) and build (device→host). A frame goes out at once when the IN endpoint is idle. While a transfer is in flight, frames gather in a second NTB, so there is no aggregation timer and no added latency. |
 | `enet/` | ENET MAC in RMII mode, fixed 100 Mbit/s full-duplex, no MDIO/PHY polling. Zero-copy DMA descriptor rings shared with the NCM layer where alignment allows. |
-| `nessum/` | Nessum IC control over UART: reset/boot sequencing, configuration, link-state polling or IRQ. Link state drives the NCM `NETWORK_CONNECTION` notification. |
+| `nessum/` | Nessum IC control over an interrupt-driven UART: reset/boot sequencing, configuration, and a background link-state poll (non-blocking; `core/nline.c` parses replies). Link state drives the NCM `NETWORK_CONNECTION` notification. |
 | `mgmt/` | CDC-ACM console protocol per [`../docs/MANAGEMENT.md`](../docs/MANAGEMENT.md): `VERSION`, `STATUS`, `MAC GET/SET/CLEAR`, `NKEY GET/SET`, `LOCK`, `REBOOT`, `NESSUM` pass-through. [`../host/tools/fake_adapter.py`](../host/tools/fake_adapter.py) is the executable reference for its behaviour. |
 | `macaddr/` | MAC selection (runtime → programmed → default). Reads the default EUI-48 from the 24AA02E48 (0xFA–0xFF). The programmed address is stored as two CRC-16-protected copies in the EEPROM's writable lower half, and each write is read back to verify. Rejects multicast, zero and broadcast. Handles NCM `SET/GET_NET_ADDRESS`: runtime only, and `SET` STALLs once factory-locked. |
 | `nkey/` | Nessum network key: `NKEY SET` seals it with the DCP using the chip-unique OTP key and stores the blob in QSPI. `NKEY GET` returns only SHA-256 fingerprint and length. The key is unsealed at boot and loaded into the SC1320A over UART. Zeroise RAM copies after use. |

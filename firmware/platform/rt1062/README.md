@@ -7,11 +7,12 @@
 
 | File | What it does |
 |---|---|
-| `main.c` | Bare-metal superloop: TinyUSB, ENET receive, console, Nessum link poll, re-enumeration after `REBOOT`. |
+| `main.c` | Bare-metal superloop: TinyUSB, ENET receive, console, Nessum link poll, re-enumeration after `REBOOT`. Nothing in it blocks. |
 | `usb_ncm.c/h` | CDC-NCM as a TinyUSB **application class driver**, built on `core/ncm.c`. Handles `GET_NTB_PARAMETERS` (NTB16, 8 KB each way); `GET/SET_NET_ADDRESS` (SET is STALLed on a locked unit); and `SET_ETHERNET_PACKET_FILTER`. Sends `CONNECTION_SPEED_CHANGE` and `NETWORK_CONNECTION` when the Nessum link changes. The MAC is re-selected at every bus reset. |
 | `usb_descriptors.c/h` | Composite IAD device: NCM (itf 0/1) + ACM console (itf 2/3). `iMACAddress` = active MAC, `wMaxSegmentSize` 1518. Both HS and FS configurations are provided. **VID:PID `1209:0000` is a placeholder.** |
 | `enet_bridge.c/h` | ENET in RMII, 100 Mbit/s full duplex, promiscuous, with no PHY. The 50 MHz REF_CLK is driven out from the ENET PLL. The bridge applies back-pressure in both directions and counts drops. |
-| `plat_rt1062.c/h` | `platform.h`: 24AA02E48 over LPI2C (page writes, ACK polling); key blob in the last QSPI sector via the ROM FlexSPI API; DCP AES-128 sealing with the OTPMK; SC1320A UART; serial from the OCOTP unique ID. |
+| `plat_rt1062.c/h` | `platform.h`: 24AA02E48 over LPI2C (page writes, ACK polling); key blob in the last QSPI sector via the ROM FlexSPI API; DCP AES-128 sealing with the OTPMK; SC1320A command transactions; serial from the OCOTP unique ID. |
+| `nessum_uart.c/h` | Interrupt-driven LPUART to the SC1320A: RX ring (512 B) and TX ring (256 B), filled and drained in the ISR. It counts overruns, ring overflows and line errors, and zeroes TX bytes once sent (commands can carry the key). |
 | `board.c/h` | Pins, clocks, SysTick, USB PHY. Pin and peripheral assignments are **TBD against the PCB**. |
 | `tusb_config.h` | TinyUSB configuration. TinyUSB's own NCM driver is off. |
 | `check/` | Link-check stand-ins (pin mux, clocks, MPU) and `fetch-deps.sh` (pinned TinyUSB / MCUXpresso SDK / CMSIS). |
@@ -34,10 +35,11 @@
 4. **Flash from XIP.** The key-blob erase/program runs ROM code with interrupts off.
    Verify this on hardware: if the ROM API misbehaves while executing in place, move
    the caller to ITCM.
-5. **Blocking UART.**
-   - A Nessum exchange blocks the loop until the reply, or for up to 500 ms when the
-     IC is silent (the link poll then backs off to 5 s).
-   - Make the UART interrupt-driven before measuring throughput.
+5. **Nessum UART timing.** Reception is interrupt-driven and the link poll runs as a
+   background transaction, so the main loop never waits on the IC.
+   - Synchronous commands (console `NESSUM`/`STATUS`, key load, version) still wait
+     for their reply, up to 500 ms, but keep USB and the ENET serviced meanwhile.
+   - Check the ISR latency at the final baud rate (`rx_hw_overrun` must stay 0).
 6. **Image size.** The DMA buffers sit in `.ncache`. The SDK linker script gives that
    section a load image, which adds about 53 KB of zeros to the flash image. Mark it
    `NOLOAD` in the production linker script.
