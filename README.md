@@ -95,7 +95,7 @@ finds each unit by USB topology, writes the MAC into the AX88772C EEPROM and rea
 back, and verifies it in hardware after the operator re-plugs the unit (RE-PLUG TO
 VERIFY → **VERIFIED**). **Labels only after VERIFIED is enforced:** the station never
 reveals a MAC before verification, and won't program another unit while one is waiting.
-**Label printing** (MAC, Code 128 barcode, serial, run) is available from VERIFIED on:
+**Label printing** (QR code, MAC, serial, run, Code 128 barcode) is available from VERIFIED on:
 through the browser to any printer, or as ZPL straight to a Zebra-compatible thermal
 printer (`--printer zpl:tcp://HOST`). Every print and reprint is logged. Still pending before production: the SC1320A key/lock
 commands (spec S4), and confirming the AX88772C EEPROM layout. Until the layout is
@@ -112,7 +112,7 @@ confirmed the tools only run with `--engineering`. See
 | [`hardware/schematic.svg`](hardware/schematic.svg), [`hardware/bom.csv`](hardware/bom.csv) | Option A (fallback) schematic (`gen_schematic.py`) and BOM |
 | [`host/linux/options-bc/`](host/linux/options-bc/) | **Option C** host files: `asix`/`cp210x` kernel config, udev naming (`eth2`, `/dev/nessum-mgmt`) |
 | [`host/linux/`](host/linux/) | networkd config for `eth2`, bring-up check; option A kernel/udev/`.link` files |
-| [`host/tools/`](host/tools/) | `factory_program.py` + `factory_ui.py`/`.html` (runs, log, UI), `optionc.py` (option C backend), `labels.py` (labels, Code 128, printers), `fake_optionc.py` / `fake_adapter.py` (simulators), `nessumctl.py` (option A), tests |
+| [`host/tools/`](host/tools/) | `factory_program.py` + `factory_ui.py`/`.html` (runs, log, UI), `optionc.py` (option C backend), `labels.py` (labels, Code 128, printers), `qr.py` (QR encoder), `fake_optionc.py` / `fake_adapter.py` (simulators), `nessumctl.py` (option A), tests |
 | [`docs/MANAGEMENT.md`](docs/MANAGEMENT.md), [`firmware/README.md`](firmware/README.md) | Option A only: MCU console protocol, MAC/key lock, firmware plan |
 
 ## Tests

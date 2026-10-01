@@ -354,13 +354,14 @@ def labels_printed(rows, serial, mac):
     return sum(1 for r in rows if r["status"] == "label-printed" and r["serial"] == serial and r["mac"] == mac)
 
 
-def print_label(log, printer, serial, needs_verify, size=(50, 25), title="Nessum Adapter"):
+def print_label(log, printer, serial, needs_verify, size=(50, 25), title="Nessum Adapter",
+                qr_template=labels.DEFAULT_QR):
     """Print (or hand to the browser) the label for a unit and log it. Returns the
     printer's result dict plus the label fields."""
     rows = read_log(log)
     rec = labelable_record(rows, serial, needs_verify)
     n = labels_printed(rows, serial, rec["mac"]) + 1
-    fields = labels.label_fields(rec, title)
+    fields = labels.label_fields(rec, title, qr_template=qr_template)
     out = printer.send(fields, size)          # raises labels.PrintError: nothing logged
     append_log(log, run=rec["run"], status="label-printed", mac=rec["mac"], serial=serial,
                key_fp=rec["key_fp"], detail=f"{printer.describe()}" + (f" (reprint {n - 1})" if n > 1 else ""))
@@ -393,6 +394,9 @@ def main(argv=None):
     p.add_argument("--printer", help="with --verify: print the label once VERIFIED "
                    "(zpl:tcp://HOST[:PORT] | zpl:/dev/usb/lp0 | file:DIR)")
     p.add_argument("--label-size", default="50x25", help="label size in mm (default 50x25)")
+    p.add_argument("--qr-content", default=labels.DEFAULT_QR,
+                   help="QR code template: {barcode} {mac} {serial} {run} {date} {title} "
+                        f"(default {labels.DEFAULT_QR!r})")
     p.add_argument("--run", help="production run ID, e.g. R2026-10")
     p.add_argument("--block",
                    help="this run's MAC block: 'first-last' or 'base/prefixlen' (e.g. 00:50:c2:aa:00:00/39)")
@@ -417,7 +421,7 @@ def main(argv=None):
                 if printer.mode == "browser":
                     raise ValueError("the browser printer is only available in factory_ui.py")
                 out = print_label(args.log, printer, backend.peek_serial(), needs_verify=True,
-                                  size=labels.parse_size(args.label_size))
+                                  size=labels.parse_size(args.label_size), qr_template=args.qr_content)
                 print(f"label printed ({out['sent_to']})")
             except (ValueError, labels.PrintError) as e:
                 print(f"factory_program: label not printed: {e}", file=sys.stderr)

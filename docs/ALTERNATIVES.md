@@ -140,11 +140,22 @@ Operator flow: plug in → **RE-PLUG TO VERIFY** → unplug and re-plug the same
 
 **Label printing** ([`host/tools/labels.py`](../host/tools/labels.py)):
 
-- **Content:** a 50 × 25 mm label (`--label-size`) with title, date, `MAC xx:xx:…`, a
-  **Code 128** barcode of the 12 hex digits, serial and run.
-  - The encoder was cross-checked against the python-barcode library's Code 128
-    tables, and a rendered label decodes correctly with zxing-cpp.
-  - CI keeps golden symbols and a round-trip decoder test.
+- **Content:** a 50 × 25 mm label (`--label-size`):
+  - a **QR code** (top left, ECC level M) holding `MAC;serial;run`, for example
+    `0050C2AA0007;CP2102N-0001;R2026-10`. `--qr-content` sets the template, using
+    `{barcode}`, `{mac}`, `{serial}`, `{run}`, `{date}` and `{title}`, up to 64 bytes;
+  - title, MAC, serial, run and date beside it;
+  - a full-width **Code 128** barcode of the 12 hex MAC digits along the bottom.
+- **How the codes were verified:**
+  - **QR encoder** ([`host/tools/qr.py`](../host/tools/qr.py), standard library only):
+    matched the `qrcode` library module-for-module on 216 symbols (all ECC levels,
+    all 8 masks, versions 1–9).
+  - **Code 128 encoder:** matched python-barcode's tables.
+  - **Rendered labels:** both codes decode with zxing-cpp, including 32-character
+    serials and the small on-screen preview.
+  - **CI:** golden hashes and structure tests (finder, timing and format information).
+- **ZPL:** printers draw both codes themselves (`^BQ` and `^BC`). The QR module size is
+  chosen to fit the area: 3 dots at 203 dpi, or 2 dots for longer content.
 - **Printers** (`--printer`):
   - `browser` (default): prints from the page, to any printer the station PC has; add
     Chrome's `--kiosk-printing` for no dialog.
@@ -163,7 +174,7 @@ Operator flow: plug in → **RE-PLUG TO VERIFY** → unplug and re-plug the same
   the label right after a successful verification.
 
 ![Option C: verified, label printed](images/factory-ui-c-label.png)
-![Sample label (50 × 25 mm)](images/label-sample.png)
+![Sample label (50 × 25 mm) with QR code and Code 128](images/label-sample.png)
 
 ![Option C: programmed, MAC hidden until re-plug](images/factory-ui-c-pass.png)
 ![Option C: wrong unit plugged in while one is waiting](images/factory-ui-c-wrong-unit.png)

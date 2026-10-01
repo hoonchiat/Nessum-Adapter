@@ -1,12 +1,15 @@
 """Unit labels for the production station: layout, Code 128 barcode, printers.
 
-Label (default 50 x 25 mm): title, the MAC in text and as a Code 128 barcode (12 hex
-digits, no colons), serial, run and date. Two renderings of the same layout:
+Label (default 50 x 25 mm): a QR code (top left; default content
+"<MAC hex>;<serial>;<run>", see --qr-content), title, MAC, serial, run and date
+beside it, and a full-width Code 128 barcode of the MAC (12 hex digits) along the
+bottom. Two renderings of the same layout:
 
 * SVG, for the browser print path (any printer the station PC can print to) and
-  for the on-screen preview. The barcode is drawn here (Code 128, code set B).
-* ZPL, sent straight to a Zebra-compatible thermal printer, which draws the
-  barcode itself (^BC).
+  for the on-screen preview. Both codes are drawn here (Code 128 set B; QR code
+  byte mode, ECC level M, from qr.py).
+* ZPL, sent straight to a Zebra-compatible thermal printer, which draws the codes
+  itself (^BC, ^BQ).
 
 Printers (``--printer``):
   browser                  the page prints the SVG label (window.print; silent with
@@ -24,6 +27,11 @@ import re
 import socket
 from xml.sax.saxutils import escape
 
+import qr
+
+DEFAULT_QR = "{barcode};{serial};{run}"
+QR_MAX_BYTES = 64          # keeps the code small enough for a 25 mm high label
+QR_QUIET = 4               # QR quiet zone, modules each side
 # ---------------------------------------------------------------- Code 128
 # Bar/space module widths for values 0..106 (106 = stop, 7 elements, 13 modules).
 _PATTERNS = (
@@ -74,9 +82,21 @@ def clean(text, limit=40):
     return SAFE.sub("?", str(text))[:limit]
 
 
-def label_fields(rec, title="Nessum Adapter", date=None):
+def qr_content(template, fields):
+    """Fill the QR template ({mac} {barcode} {serial} {run} {date} {title})."""
+    try:
+        text = template.format(**fields)
+    except (KeyError, IndexError, ValueError) as e:
+        raise ValueError(f"bad --qr-content template {template!r}: {e}") from None
+    text = re.sub(r"[\x00-\x1f\x7f^~]", "?", text)   # no control chars, nothing ZPL interprets
+    if not text or len(text.encode()) > QR_MAX_BYTES:
+        raise ValueError(f"QR content must be 1-{QR_MAX_BYTES} bytes, got {len(text.encode())}")
+    return text
+
+
+def label_fields(rec, title="Nessum Adapter", date=None, qr_template=DEFAULT_QR):
     mac = rec["mac"].lower()
-    return {
+    fields = {
         "title": clean(title, 32),
         "mac": mac,
         "barcode": mac.replace(":", "").upper(),
@@ -84,6 +104,8 @@ def label_fields(rec, title="Nessum Adapter", date=None):
         "run": clean(rec.get("run", ""), 24),
         "date": date or datetime.date.today().isoformat(),
     }
+    fields["qr"] = qr_content(qr_template, fields)
+    return fields
 
 
 def parse_size(text):
@@ -97,12 +119,74 @@ def parse_size(text):
 
 
 # ---------------------------------------------------------------- SVG (browser / preview)
+class _Layout:
+    """Shared geometry (mm) of the label, used by both the SVG and the ZPL output."""
+
+    def __init__(self, fields, size):
+        self.w, self.h = w, h = size
+        t = self.t = h / 25.0                      # scale relative to a 25 mm high label
+        self.m = 1.0 * t                           # outer margin
+        self.qr = qr.encode(fields["qr"], "M")
+        self.qr_side = 15.0 * t                    # QR incl. its quiet zone (square)
+        self.text_x = self.m + self.qr_side + 1.0 * t
+        self.text_w = w - self.text_x - self.m
+        self.bars = code128_bars(fields["barcode"])
+        self.bar_top = 16.4 * t
+        self.bar_h = h - self.bar_top - 1.2 * t
+        # text baselines and sizes (mm)
+        self.lines = [
+            ("title", 4.4 * t, 3.0 * t, "bold", False),
+            ("mac", 8.4 * t, 2.9 * t, "bold", True),
+            ("sn", 11.8 * t, 2.3 * t, "normal", False),
+            ("run", 14.9 * t, 2.1 * t, "normal", False),
+        ]
+
+    def text(self, fields):
+        return {"title": fields["title"], "mac": fields["mac"], "sn": f"S/N {fields['serial']}",
+                "run": f"Run {fields['run']}  {fields['date']}"}
+
+
+def _fits(text, size, width, mono):
+    """Rough rendered width check (mm) for DejaVu Sans / Mono."""
+    return len(text) * size * (0.60 if mono else 0.56) <= width
+
+
 def svg_label(fields, size=(50, 25)):
+    L = _Layout(fields, size)
     w, h = size
-    m = 2.0                                     # margin, mm
-    bars = code128_bars(fields["barcode"])
-    module = w / (len(bars) + 2 * QUIET)         # mm per module; quiet zones may use the margin
-    bar_top, bar_h = h * 0.40, h * 0.34
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}mm" height="{h}mm" viewBox="0 0 {w} {h}" '
+             f'font-family="DejaVu Sans, Arial, sans-serif">',
+             f'<rect width="{w}" height="{h}" fill="#fff"/>']
+    # QR code
+    n = len(L.qr)
+    mod = L.qr_side / (n + 2 * QR_QUIET)
+    ox = oy = L.m + QR_QUIET * mod
+    rects = []
+    for y, row in enumerate(L.qr):
+        x = 0
+        while x < n:
+            if row[x]:
+                x2 = x
+                while x2 < n and row[x2]:
+                    x2 += 1
+                rects.append(f'<rect x="{ox + x * mod:.3f}" y="{oy + y * mod:.3f}" '
+                             f'width="{(x2 - x) * mod:.3f}" height="{mod:.3f}"/>')
+                x = x2
+            else:
+                x += 1
+    parts.append(f'<g fill="#000" shape-rendering="crispEdges">{"".join(rects)}</g>')
+    # text column
+    texts = L.text(fields)
+    for key, base, fs, weight, mono in L.lines:
+        txt = texts[key]
+        fit = "" if _fits(txt, fs, L.text_w, mono) else \
+            f' textLength="{L.text_w:.2f}" lengthAdjust="spacingAndGlyphs"'
+        fam = ' font-family="DejaVu Sans Mono, monospace"' if mono else ""
+        parts.append(f'<text x="{L.text_x:.2f}" y="{base:.2f}" font-size="{fs:.2f}" font-weight="{weight}"'
+                     f'{fam}{fit}>{escape(txt)}</text>')
+    # Code 128 along the bottom
+    bars = L.bars
+    module = w / (len(bars) + 2 * QUIET)
     x0 = (w - len(bars) * module) / 2
     rects, i = [], 0
     while i < len(bars):
@@ -110,44 +194,42 @@ def svg_label(fields, size=(50, 25)):
             j = i
             while j < len(bars) and bars[j] == "1":
                 j += 1
-            rects.append(f'<rect x="{x0 + i * module:.3f}" y="{bar_top:.3f}" '
-                         f'width="{(j - i) * module:.3f}" height="{bar_h:.3f}"/>')
+            rects.append(f'<rect x="{x0 + i * module:.3f}" y="{L.bar_top:.3f}" '
+                         f'width="{(j - i) * module:.3f}" height="{L.bar_h:.3f}"/>')
             i = j
         else:
             i += 1
-    f = {k: escape(v) for k, v in fields.items()}
-    t = h / 25.0                                 # text scale relative to a 25 mm label
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}mm" height="{h}mm" viewBox="0 0 {w} {h}" '
-        f'font-family="DejaVu Sans, Arial, sans-serif">'
-        f'<rect width="{w}" height="{h}" fill="#fff"/>'
-        f'<text x="{m}" y="{m + 3.2 * t:.2f}" font-size="{3.2 * t:.2f}" font-weight="bold">{f["title"]}</text>'
-        f'<text x="{w - m}" y="{m + 3.2 * t:.2f}" font-size="{2.4 * t:.2f}" text-anchor="end">{f["date"]}</text>'
-        f'<text x="{m}" y="{m + 7.2 * t:.2f}" font-size="{3.4 * t:.2f}" font-family="DejaVu Sans Mono, monospace" '
-        f'font-weight="bold">MAC {f["mac"]}</text>'
-        f'<g fill="#000">{"".join(rects)}</g>'
-        f'<text x="{m}" y="{h - m:.2f}" font-size="{2.6 * t:.2f}">S/N {f["serial"]}</text>'
-        f'<text x="{w - m}" y="{h - m:.2f}" font-size="{2.6 * t:.2f}" text-anchor="end">Run {f["run"]}</text>'
-        f'</svg>')
+    parts.append(f'<g fill="#000">{"".join(rects)}</g>')
+    parts.append("</svg>")
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------- ZPL (thermal printers)
 def zpl_label(fields, size=(50, 25), dpmm=8):
     """ZPL II for a Zebra-compatible printer (dpmm 8 = 203 dpi, 12 = 300 dpi)."""
+    L = _Layout(fields, size)
     w, h = (round(v * dpmm) for v in size)
     d = lambda mm: round(mm * dpmm)  # noqa: E731
-    symbol = len(code128_bars(fields["barcode"]))
-    bw = max(1, min(3, w // (symbol + 2 * QUIET)))  # widest module (dots) that keeps the quiet zones
+    out = ["^XA", "^CI28", f"^PW{w}", f"^LL{h}", "^LH0,0"]
+    # QR: magnification = whole dots per module that fit the QR area with its quiet zone
+    n = len(L.qr)
+    mag = max(1, min(10, d(L.qr_side) // (n + 2 * QR_QUIET)))
+    qpos = d(L.m) + QR_QUIET * mag
+    out.append(f"^FO{qpos},{qpos}^BQN,2,{mag}^FDMA,{fields['qr']}^FS")
+    # text column; shrink a line until it fits the column width
+    texts = L.text(fields)
+    for key, base, fs, _weight, mono in L.lines:
+        txt = texts[key]
+        while fs > 1.2 and not _fits(txt, fs, L.text_w, mono):
+            fs -= 0.1
+        out.append(f"^FO{d(L.text_x)},{d(base - fs)}^A0N,{d(fs)},{d(fs)}^FD{txt}^FS")
+    # Code 128 along the bottom
+    symbol = len(L.bars)
+    bw = max(1, min(3, w // (symbol + 2 * QUIET)))   # widest module (dots) that keeps the quiet zones
     bx = (w - symbol * bw) // 2
-    return "\n".join([
-        "^XA", "^CI28", f"^PW{w}", f"^LL{h}", "^LH0,0",
-        f"^FO{d(2)},{d(1.5)}^A0N,{d(3.2)},{d(3.2)}^FD{fields['title']}^FS",
-        f"^FO{d(2)},{d(1.5)}^FB{w - d(4)},1,0,R^A0N,{d(2.4)},{d(2.4)}^FD{fields['date']}^FS",
-        f"^FO{d(2)},{d(5.2)}^A0N,{d(3.4)},{d(3.4)}^FDMAC {fields['mac']}^FS",
-        f"^FO{bx},{d(10)}^BY{bw}^BCN,{d(8.5)},N,N,N^FD{fields['barcode']}^FS",
-        f"^FO{d(2)},{h - d(4.6)}^A0N,{d(2.6)},{d(2.6)}^FDS/N {fields['serial']}^FS",
-        f"^FO{d(2)},{h - d(4.6)}^FB{w - d(4)},1,0,R^A0N,{d(2.6)},{d(2.6)}^FDRun {fields['run']}^FS",
-        "^PQ1", "^XZ", ""])
+    out.append(f"^FO{bx},{d(L.bar_top)}^BY{bw}^BCN,{d(L.bar_h)},N,N,N^FD{fields['barcode']}^FS")
+    out += ["^PQ1", "^XZ", ""]
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------- printers

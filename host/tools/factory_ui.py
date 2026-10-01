@@ -55,7 +55,7 @@ class Station:
     """Programming-station state shared by the HTTP handler and the auto loop."""
 
     def __init__(self, backend, key, log, lock_units=True, printer=None, label_size=(50, 25),
-                 label_title="Nessum Adapter"):
+                 label_title="Nessum Adapter", qr_template=labels.DEFAULT_QR):
         # A plain path means an option A console (kept for existing callers/tests).
         self.backend = fp.BackendA(backend) if isinstance(backend, str) else backend
         self.key = key
@@ -71,6 +71,7 @@ class Station:
         self.printer = printer or labels.BrowserPrinter()
         self.label_size = label_size
         self.label_title = label_title
+        self.qr_template = qr_template
         self.auto_print = False
         self._need_check = True
         self._mutex = threading.Lock()
@@ -171,11 +172,12 @@ class Station:
         """Print the label of a unit whose MAC may be shown; logged. Raises ValueError /
         labels.PrintError when not allowed or the printer fails."""
         return fp.print_label(self.log, self.printer, serial, self._needs_verify(),
-                              self.label_size, self.label_title)
+                              self.label_size, self.label_title, self.qr_template)
 
     def label_svg(self, serial):
         rec = fp.labelable_record(fp.read_log(self.log), serial, self._needs_verify())
-        return labels.svg_label(labels.label_fields(rec, self.label_title), self.label_size)
+        return labels.svg_label(labels.label_fields(rec, self.label_title, qr_template=self.qr_template),
+                                self.label_size)
 
     def _replug_first_msg(self):
         return (f"unit {self._pending_verify['serial']} is waiting for verification: re-plug it "
@@ -417,6 +419,9 @@ def main(argv=None):
                    help="browser (default) | zpl:tcp://HOST[:PORT] | zpl:/dev/usb/lp0 | file:DIR")
     p.add_argument("--label-size", default="50x25", help="label size in mm (default 50x25)")
     p.add_argument("--label-title", default="Nessum Adapter", help="first line of the label")
+    p.add_argument("--qr-content", default=labels.DEFAULT_QR,
+                   help="QR code template: {barcode} {mac} {serial} {run} {date} {title} "
+                        f"(default {labels.DEFAULT_QR!r})")
     p.add_argument("--dpmm", type=int, default=8, choices=(6, 8, 12, 24),
                    help="ZPL printer resolution in dots/mm (8 = 203 dpi, 12 = 300 dpi)")
     args = p.parse_args(argv)
@@ -430,11 +435,15 @@ def main(argv=None):
     try:
         printer = labels.make_printer(args.printer, args.dpmm)
         size = labels.parse_size(args.label_size)
+        # fail at start-up, not at the first label, on a bad template
+        labels.label_fields({"mac": "00:00:00:00:00:01", "serial": "X" * 32, "run": "R" * 24},
+                            args.label_title, qr_template=args.qr_content)
     except ValueError as e:
         print(f"factory_ui: {e}", file=sys.stderr)
         return 2
     station = Station(fp.make_backend(args), key, args.log, lock_units=not args.no_lock,
-                      printer=printer, label_size=size, label_title=args.label_title)
+                      printer=printer, label_size=size, label_title=args.label_title,
+                      qr_template=args.qr_content)
     stop = threading.Event()
     threading.Thread(target=station.auto_loop, args=(stop,), daemon=True).start()
     server = make_server(station, args.port)

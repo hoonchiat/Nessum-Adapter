@@ -17,8 +17,11 @@ import factory_program as fp  # noqa: E402
 import factory_ui  # noqa: E402
 import fake_adapter  # noqa: E402
 import fake_optionc as fk  # noqa: E402
+import hashlib  # noqa: E402
+
 import labels  # noqa: E402
 import optionc  # noqa: E402
+import qr  # noqa: E402
 
 KEY = bytes.fromhex("0f1e2d3c4b5a69788796a5b4c3d2e1f0")
 BLOCK = "00:50:c2:aa:00:00-00:50:c2:aa:00:09"
@@ -75,6 +78,54 @@ class Code128Test(unittest.TestCase):
                 labels.code128_values(bad)
 
 
+# SHA-256 (first 16 hex) of the version 3-M symbol for QR_TEXT with each mask 0..7.
+# Each symbol was checked module-for-module against the 'qrcode' library when written.
+QR_TEXT = "0050C2AA0007;CP2102N-0001;R2026-10"
+QR_GOLDEN = {0: "fcb822ff712b7850", 1: "6eb74ab4dc92d2bf", 2: "aed1885709547bcf", 3: "122b1f8b0807ae3c",
+             4: "e8195d5ec95c738a", 5: "363008e78bb471dd", 6: "7bf30f70ee7fc68a", 7: "5682da4331931cc0"}
+
+
+def bits(m):
+    return "".join("1" if v else "0" for row in m for v in row)
+
+
+class QrTest(unittest.TestCase):
+    def test_golden_all_masks(self):
+        self.assertEqual(qr.choose_version(len(QR_TEXT), "M"), 3)
+        for mask, h in QR_GOLDEN.items():
+            with self.subTest(mask=mask):
+                m = qr.encode(QR_TEXT, "M", 3, mask)
+                self.assertEqual(hashlib.sha256(bits(m).encode()).hexdigest()[:16], h)
+
+    def test_structure(self):
+        m = qr.encode(QR_TEXT)
+        n = len(m)
+        self.assertEqual(n, 29)
+        finder = [[max(abs(dx), abs(dy)) not in (2, 4) for dx in range(-3, 4)] for dy in range(-3, 4)]
+        for cx, cy in ((3, 3), (n - 4, 3), (3, n - 4)):
+            self.assertEqual([row[cx - 3:cx + 4] for row in m[cy - 3:cy + 4]], finder)
+        self.assertEqual([m[6][x] for x in range(8, n - 8)], [x % 2 == 0 for x in range(8, n - 8)])  # timing
+        self.assertTrue(m[n - 8][8])                                                       # dark module
+
+    def test_format_info_decodes(self):
+        """The 15 format bits around the top-left finder decode to (M, chosen mask)."""
+        for mask in range(8):
+            m = qr.encode(QR_TEXT, "M", 3, mask)
+            got = [m[i][8] for i in range(6)] + [m[7][8], m[8][8], m[8][7]] + [m[8][14 - i] for i in range(9, 15)]
+            word = sum(1 << i for i, v in enumerate(got) if v) ^ 0x5412
+            self.assertEqual((word >> 10) >> 3, qr.ECC_LEVELS["M"])
+            self.assertEqual((word >> 10) & 7, mask)
+
+    def test_versions_and_capacity(self):
+        self.assertEqual(qr.data_codewords(1, "M"), 16)
+        self.assertEqual(qr.data_codewords(3, "M"), 44)
+        self.assertEqual(qr.data_codewords(7, "M"), 124)
+        self.assertEqual(len(qr.encode("x" * 110)), 4 * qr.choose_version(110) + 17)
+        self.assertEqual(qr.choose_version(110), 7)                 # exercises version information
+        with self.assertRaises(ValueError):
+            qr.encode("x" * 300)
+
+
 class LayoutTest(unittest.TestCase):
     def setUp(self):
         self.f = labels.label_fields({"mac": "00:50:C2:AA:00:07", "serial": "CP2102N-0001", "run": "R2026-10"},
@@ -93,20 +144,42 @@ class LayoutTest(unittest.TestCase):
         self.assertIn("^PW400", z)                  # 50 mm at 8 dots/mm
         self.assertIn("^BY2", z)                    # 2-dot modules fit with quiet zones
         self.assertIn("^FD0050C2AA0007^FS", z)
-        self.assertIn("^FDMAC 00:50:c2:aa:00:07^FS", z)
+        self.assertIn("^FD00:50:c2:aa:00:07^FS", z)
         self.assertIn("^FDS/N CP2102N-0001^FS", z)
+        self.assertIn("^BQN,2,3^FDMA,0050C2AA0007;CP2102N-0001;R2026-10^FS", z)
         self.assertEqual(z.count("^XA"), 1)          # sanitised data can't inject a label
-        # barcode + quiet zones fit inside the label
-        bx = int(z.split("^FO")[4].split(",")[0])
-        self.assertGreaterEqual(bx, 2 * labels.QUIET)
+        bc = next(l for l in z.splitlines() if "^BC" in l)
+        bx, by = (int(v) for v in bc[3:].split("^")[0].split(","))
+        self.assertGreaterEqual(bx, 2 * labels.QUIET)  # barcode + quiet zones fit inside the label
         self.assertLessEqual(bx + 2 * len(labels.code128_bars("0050C2AA0007")) + 2 * labels.QUIET, 400)
+        # QR (3 dots/module, version 3 = 29 modules) ends above the barcode
+        self.assertLess(20 + 3 * 29, by)
 
     def test_svg(self):
         svg = labels.svg_label(self.f, (50, 25))
         xml.dom.minidom.parseString(svg)
         self.assertIn('width="50mm"', svg)
-        self.assertIn("MAC 00:50:c2:aa:00:07", svg)
+        self.assertIn("00:50:c2:aa:00:07", svg)
         self.assertIn("S/N CP2102N-0001", svg)
+        self.assertIn('shape-rendering="crispEdges"', svg)
+
+    def test_qr_template(self):
+        self.assertEqual(self.f["qr"], "0050C2AA0007;CP2102N-0001;R2026-10")
+        rec = {"mac": "00:50:c2:aa:00:07", "serial": "CP1", "run": "R1"}
+        f = labels.label_fields(rec, qr_template="MAC={mac} SN={serial}")
+        self.assertEqual(f["qr"], "MAC=00:50:c2:aa:00:07 SN=CP1")
+        self.assertEqual(labels.label_fields(rec, qr_template="{barcode}^XZ~")["qr"], "0050C2AA0007?XZ?")
+        for bad in ("{nope}", "{", "x" * 65):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                labels.label_fields(rec, qr_template=bad)
+
+    def test_long_serial_fits(self):
+        f = labels.label_fields({"mac": "00:50:c2:aa:00:08", "serial": "a4a8a10a7f9bec11b2fb8c3a0d2c2ff9",
+                                 "run": "R2026-10"})
+        svg = labels.svg_label(f)
+        self.assertIn('lengthAdjust="spacingAndGlyphs"', svg)   # squeezed into the text column
+        z = labels.zpl_label(f)
+        self.assertIn("^BQN,2,2^", z)                            # version 4 needs a smaller module
 
     def test_parse_size_and_printers(self):
         self.assertEqual(labels.parse_size("50x25"), (50.0, 25.0))
