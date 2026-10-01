@@ -39,6 +39,24 @@ bool plat_nessum_load_key(const uint8_t *key, size_t len);
 bool plat_nessum_link(uint32_t *rate_mbps, uint32_t *peers);
 const char *plat_nessum_version(void);
 
+/* ---- Firmware slots (QSPI flash; USB DFU and the bootloader) ----
+ * Flash map (8 MB part): 0x000000 bootloader (64 KB, FCB + IVT) | 0x010000 active
+ * slot (1 MB) | 0x110000 staging slot (1 MB) | ... | last 4 KB: network key blob.
+ * A slot holds a signed image (core/fwimage.h); the active slot's payload runs in
+ * place, so its vector table is at FW_ACTIVE_LOAD_ADDR. */
+#define FW_SLOT_SIZE 0x100000u
+#define FW_SECTOR_SIZE 0x1000u
+#define FW_PAGE_SIZE 256u
+#define FW_ACTIVE_LOAD_ADDR 0x60010400u   /* 0x60000000 (FlexSPI) + 0x10000 + header */
+typedef enum { FW_SLOT_ACTIVE = 0, FW_SLOT_STAGING = 1 } fw_slot_t;
+/* Read access (memory-mapped on the RT1062). */
+const uint8_t *plat_slot_map(fw_slot_t slot);
+/* Erase the sector at off (sector-aligned). */
+bool plat_slot_erase(fw_slot_t slot, uint32_t off);
+/* Program len (<= FW_SECTOR_SIZE) bytes at off (page-aligned) into erased flash;
+ * a partial last page is padded with 0xFF. */
+bool plat_slot_program(fw_slot_t slot, uint32_t off, const uint8_t *data, uint32_t len);
+
 /* ---- Identity / control ---- */
 const char *plat_serial(void);   /* USB iSerial (RT1062 unique ID) */
 const char *plat_hw_rev(void);

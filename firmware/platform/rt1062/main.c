@@ -15,6 +15,7 @@
 #include "plat_rt1062.h"
 #include "platform.h"
 #include "usb_descriptors.h"
+#include "usb_dfu.h"
 #include "usb_ncm.h"
 
 #define CONSOLE_ITF 0
@@ -92,6 +93,7 @@ int main(void)
     keystore_load_into_nessum(&s_keys);
     mgmt_init(&s_mgmt, &s_macs, &s_keys, console_write, NULL);
 
+    usb_dfu_init();
     ncm_dev_bind(&s_macs);
     usb_descriptors_bind(s_macs.active);
     enet_bridge_init(s_macs.active);
@@ -105,5 +107,6 @@ int main(void)
         console_poll();
         link_poll();
         reenumerate_poll();
+        usb_dfu_poll();
     }
 }

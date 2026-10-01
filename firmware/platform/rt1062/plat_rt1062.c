@@ -2,7 +2,7 @@
  * plat_rt1062.c - platform.h on the i.MX RT1062 (option A adapter).
  *
  *   EEPROM    24AA02E48 on LPI2C (page writes + acknowledge polling)
- *   key blob  last QSPI sector, via the boot ROM's FlexSPI NOR API
+ *   key blob  last QSPI sector (flash_rt1062.c: the boot ROM's FlexSPI NOR API)
  *   sealing   DCP AES-128 with the OTP master key (OTPMK) - see "Sealing" below
  *   Nessum    SC1320A command UART (nessum_uart.c, interrupt-driven) and reset line
  *
@@ -14,19 +14,16 @@
 #include <string.h>
 
 #include "board.h"
-#include "fsl_cache.h"
 #include "fsl_dcp.h"
 #include "fsl_iomuxc.h"
 #include "fsl_lpi2c.h"
-#include "fsl_romapi.h"
+#include "flash_rt1062.h"
 #include "nessum_uart.h"
 #include "nline.h"
 #include "platform.h"
 #include "plat_rt1062.h"
 #include "util.h"
 
-static flexspi_nor_config_t s_nor;
-static bool s_nor_ok;
 static char s_serial[17];
 static char s_nessum_version[32] = "unknown";
 static volatile bool s_reenumerate;
@@ -89,42 +86,20 @@ bool plat_eeprom_write(uint8_t addr, const uint8_t *buf, size_t len)
 }
 
 /* ---------------------------------------------------------------- key blob in QSPI */
-/* The image runs XIP from this flash: no code may be fetched from it while it is
- * erased or programmed, so interrupts are off and only ROM code runs meanwhile. */
-static bool flash_op(bool erase, const uint32_t *page)
-{
-    if (!s_nor_ok)
-        return false;
-    uint32_t primask = DisableGlobalIRQ();
-    status_t st = erase ? ROM_FLEXSPI_NorFlash_Erase(BOARD_FLEXSPI_INSTANCE, &s_nor, BOARD_KEYBLOB_OFFSET, 4096u)
-                        : ROM_FLEXSPI_NorFlash_ProgramPage(BOARD_FLEXSPI_INSTANCE, &s_nor, BOARD_KEYBLOB_OFFSET, page);
-    ROM_FLEXSPI_NorFlash_ClearCache(BOARD_FLEXSPI_INSTANCE);
-    EnableGlobalIRQ(primask);
-    DCACHE_InvalidateByRange(BOARD_FLEXSPI_AMBA_BASE + BOARD_KEYBLOB_OFFSET, 4096u);
-    return st == kStatus_Success;
-}
-
 bool plat_keyblob_read(uint8_t *buf, size_t len)
 {
     if (len > KEYBLOB_MAX)
         return false;
-    memcpy(buf, (const void *)(BOARD_FLEXSPI_AMBA_BASE + BOARD_KEYBLOB_OFFSET), len);
+    memcpy(buf, flash_map(BOARD_KEYBLOB_OFFSET), len);
     return true;   /* an erased sector reads 0xFF: keystore rejects it by magic/CRC */
 }
 
 bool plat_keyblob_write(const uint8_t *buf, size_t len)
 {
-    static uint32_t page[256 / 4];   /* one NOR page, word aligned for the ROM */
-    if (len > KEYBLOB_MAX)
-        return false;
-    memset(page, 0xFF, sizeof page);
-    memcpy(page, buf, len);
-    bool ok = flash_op(true, NULL) && flash_op(false, page);
-    secure_zero(page, sizeof page);
-    return ok;
+    return len <= KEYBLOB_MAX && flash_erase_sector(BOARD_KEYBLOB_OFFSET) && flash_program(BOARD_KEYBLOB_OFFSET, buf, len);
 }
 
-bool plat_keyblob_erase(void) { return flash_op(true, NULL); }
+bool plat_keyblob_erase(void) { return flash_erase_sector(BOARD_KEYBLOB_OFFSET); }
 
 /* ---------------------------------------------------------------- sealing
  * AES-128 with the DCP's OTP key slot = the low 128 bits of the OTPMK fuses, which
@@ -310,13 +285,7 @@ void plat_rt1062_init(void)
     DCP_GetDefaultConfig(&dcp);
     DCP_Init(DCP, &dcp);
 
-    /* FlexSPI NOR parameters for the ROM API: QuadSPI NOR, SFDP-probed, 133 MHz
-     * (the same option word the boot ROM uses for common QSPI parts). */
-    serial_nor_config_option_t opt = {.option0 = {.U = 0xC0000007u}, .option1 = {.U = 0}};
-    uint32_t primask = DisableGlobalIRQ();   /* re-initialises the XIP flash interface */
-    s_nor_ok = ROM_FLEXSPI_NorFlash_GetConfig(BOARD_FLEXSPI_INSTANCE, &s_nor, &opt) == kStatus_Success &&
-               ROM_FLEXSPI_NorFlash_Init(BOARD_FLEXSPI_INSTANCE, &s_nor) == kStatus_Success;
-    EnableGlobalIRQ(primask);
+    flash_init();
 
     /* Release the Nessum IC and ask for its version (PLACEHOLDER command). */
     board_nessum_reset(true);

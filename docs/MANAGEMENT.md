@@ -7,7 +7,7 @@
 > production *run* rules (§3: blocks, quantities, reserve-before-write log, common-key
 > check) apply to option C unchanged.
 
-**Status:** Draft v0.3. The host tools in [`../host/tools/`](../host/tools/) implement this
+**Status:** Draft v0.4. The host tools in [`../host/tools/`](../host/tools/) implement this
 document: `nessumctl.py`, `factory_program.py`, and the reference simulator
 `fake_adapter.py`. The adapter firmware must match it.
 
@@ -295,3 +295,55 @@ Firmware obligations, so that existing software (sockets, DHCP clients, bridges,
 Known differences from a PHY-based NIC (none of these affect ordinary IP software):
 `ethtool -i` reports driver `cdc_ncm`. There is no auto-negotiation, no MDIO/PHY registers,
 no Wake-on-LAN, no PTP hardware timestamping, and no checksum/TSO offload.
+
+## 6. Firmware update (USB DFU)
+
+The adapter has a third USB function next to `eth2` and the console: a **DFU 1.1**
+interface ("Nessum Adapter Firmware"). It takes signed images only, built with
+[`host/tools/fwimage.py`](../host/tools/fwimage.py) (format: `firmware/core/fwimage.h`).
+The standard `dfu-util` drives it:
+
+```sh
+dfu-util -l                                          # lists the adapter's DFU interface
+dfu-util -d 1209:0000 -a 0 -D adapter-0.2.0.nfw      # 1209:0000 = placeholder VID:PID
+```
+
+What happens:
+
+1. **Download.** The image goes into a staging area of the flash. The first block
+   carries the header, and the adapter checks it straight away:
+   - the Ed25519 signature;
+   - the target address and the size;
+   - the version, which must be **newer** than the running firmware.
+   A rejected image fails before anything substantial is written.
+2. **End of download.** The adapter hashes the whole staged image against the signed
+   hash, then resets itself (about 0.3 s later). `eth2` and the console disappear
+   briefly; the udev rules bring `eth2` back with the same name.
+3. **Install.** The bootloader copies the staged image over the running one, verifies
+   it again and starts it. The copy is power-cut safe: if power fails, the next boot
+   simply repeats it.
+
+The MAC record, the factory lock and the sealed network key are **not touched** by
+an update. They live in the EEPROM and a separate flash sector.
+
+| `dfu-util` reports | Meaning |
+|---|---|
+| `errFILE` | Not signed with the production key, not newer than the running version, or not an image at all |
+| `errTARGET` | Image built for another flash layout |
+| `errADDRESS` | Blocks out of order, or more or less data than the header says |
+| `errWRITE` | Flash write failed (retry; persistent → RMA) |
+| `errVERIFY` | Staged image did not match its signed hash (transfer corrupted; retry) |
+
+**Rules:**
+- **Factory-locked units accept updates too.** The signature is the protection: only
+  someone holding the production signing key can make firmware that any adapter
+  accepts. That person could also read the common network key, so the key's
+  **seed is kept offline** and used only on the signing machine.
+- **Downgrades are refused.** This is enforced in firmware only, not by a fuse-backed
+  counter, so anyone with SWD access can still downgrade.
+- **Data path during an update:** each flash sector erase blocks interrupts for about
+  45 ms. Nessum frames arriving meanwhile can be dropped, so expect a short traffic
+  hiccup per 4 KB block.
+- **Recovery:** if no valid firmware remains, the bootloader starts the RT1062 ROM's
+  serial downloader, and the unit can be re-flashed with the factory tooling.
+

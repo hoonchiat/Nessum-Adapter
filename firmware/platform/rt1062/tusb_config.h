@@ -19,12 +19,14 @@
 
 #define CFG_TUD_ENDPOINT0_SIZE 64
 
-/* CDC-ACM management console. CDC-NCM is usb_ncm.c (an application class driver
+/* CDC-ACM management console, DFU firmware download. CDC-NCM is usb_ncm.c (an application class driver
  * on core/ncm.c), not TinyUSB's own NCM driver. */
 #define CFG_TUD_CDC 1
 #define CFG_TUD_CDC_RX_BUFSIZE 512
 #define CFG_TUD_CDC_TX_BUFSIZE 1024
 #define CFG_TUD_CDC_EP_BUFSIZE 512
+#define CFG_TUD_DFU 1
+#define CFG_TUD_DFU_XFER_BUFSIZE 4096   /* one flash sector per DFU block */
 #define CFG_TUD_NCM 0
 #define CFG_TUD_ECM_RNDIS 0
 

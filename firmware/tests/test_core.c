@@ -6,9 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "fwboot.h"
+#include "fwimage.h"
+#include "fwupdate.h"
 #include "host_platform.h"
 #include "keystore.h"
 #include "macstore.h"
+#include "monocypher-ed25519.h"
 #include "mgmt.h"
 #include "ncm.h"
 #include "nline.h"
@@ -416,6 +420,176 @@ static void test_nline(void)
     CHECK(p.state == NL_IDLE && p.lines[0][0] == '\0');
 }
 
+/* ---------------------------------------------------------------- firmware images / DFU / boot */
+static uint8_t g_sk[64], g_pk[32], g_sk_other[64], g_pk_other[32];
+static uint8_t g_img[64 * 1024];
+
+static void put32(uint8_t *p, uint32_t v)
+{
+    for (int i = 0; i < 4; i++)
+        p[i] = (uint8_t)(v >> (8 * i));
+}
+
+/* A signed image in g_img; returns its total length. */
+static uint32_t make_image(uint32_t version, uint32_t size, uint32_t load, const uint8_t sk[64])
+{
+    memset(g_img, 0xFF, FWIMG_HDR_SIZE);
+    memset(g_img, 0, FWIMG_HDR_MIN);
+    put32(g_img, FWIMG_MAGIC);
+    g_img[4] = FWIMG_HDR_SIZE & 0xFF;
+    g_img[5] = FWIMG_HDR_SIZE >> 8;
+    g_img[6] = FWIMG_FORMAT;
+    put32(g_img + 8, version);
+    put32(g_img + 12, size);
+    put32(g_img + 16, load);
+    for (uint32_t i = 0; i < size; i++)
+        g_img[FWIMG_HDR_SIZE + i] = (uint8_t)(i * 13 + version);
+    sha256(g_img + FWIMG_HDR_SIZE, size, g_img + 32);
+    crypto_ed25519_sign(g_img + 64, sk, g_img, FWIMG_SIGNED_LEN);
+    return FWIMG_HDR_SIZE + size;
+}
+
+static void put_slot(fw_slot_t s, uint32_t len) { memcpy(g_slots[s], g_img, len); }
+
+/* DFU-style download in 4 KB blocks; returns the first error or the finish result. */
+static enum fwup_err download(fwup_t *u, uint32_t len)
+{
+    for (uint32_t off = 0; off < len; off += 4096) {
+        uint32_t n = len - off < 4096 ? len - off : 4096;
+        enum fwup_err e = fwup_write(u, off, g_img + off, n);
+        if (e != FWUP_OK)
+            return e;
+    }
+    return fwup_finish(u);
+}
+
+static void test_fwimage(void)
+{
+    uint8_t seed[32];
+    memset(seed, 7, 32);
+    crypto_ed25519_key_pair(g_sk, g_pk, seed);
+    memset(seed, 9, 32);
+    crypto_ed25519_key_pair(g_sk_other, g_pk_other, seed);
+    const uint32_t V1 = 0x000100, V2 = 0x000200, L = FW_ACTIVE_LOAD_ADDR;
+    char vs[16];
+    fwimg_version_str(0x010203, vs);
+    CHECK(!strcmp(vs, "1.2.3"));
+
+    uint32_t n = make_image(V1, 10000, L, g_sk);
+    fwimg_info_t info;
+    CHECK(fwimg_verify(g_img, sizeof g_img, L, g_pk, &info) == FWIMG_OK && info.version == V1 && info.size == 10000);
+    CHECK(fwimg_verify(g_img, sizeof g_img, L, g_pk_other, NULL) == FWIMG_E_SIG);   /* other key */
+    CHECK(fwimg_verify(g_img, sizeof g_img, L + 4, g_pk, NULL) == FWIMG_E_ADDR);
+    CHECK(fwimg_verify(g_img, 9000, L, g_pk, NULL) == FWIMG_E_SIZE);                 /* bigger than slot */
+    g_img[n - 1] ^= 1;
+    CHECK(fwimg_verify(g_img, sizeof g_img, L, g_pk, NULL) == FWIMG_E_HASH);         /* payload tampered */
+    make_image(V1, 10000, L, g_sk);
+    g_img[8] ^= 1;
+    CHECK(fwimg_verify(g_img, sizeof g_img, L, g_pk, NULL) == FWIMG_E_SIG);          /* version tampered */
+    make_image(V1, 10000, L, g_sk);
+    g_img[200] ^= 1;                                     /* unsigned padding: ignored */
+    CHECK(fwimg_verify(g_img, sizeof g_img, L, g_pk, NULL) == FWIMG_OK);
+    g_img[200] ^= 1;
+    g_img[100] ^= 1;                                     /* signature byte */
+    CHECK(fwimg_verify(g_img, sizeof g_img, L, g_pk, NULL) == FWIMG_E_SIG);
+    g_img[100] ^= 1;
+    g_img[6] = 2;
+    CHECK(fwimg_verify(g_img, sizeof g_img, L, g_pk, NULL) == FWIMG_E_FORMAT);
+    memset(g_img, 0xFF, FWIMG_HDR_SIZE);
+    CHECK(fwimg_verify(g_img, sizeof g_img, L, g_pk, NULL) == FWIMG_E_MAGIC);       /* erased flash */
+
+    /* ---- DFU download into the staging slot ---- */
+    fresh();
+    fwup_t u;
+    n = make_image(V2, 20000, L, g_sk);
+    fwup_init(&u, g_pk, V1);
+    CHECK(download(&u, n) == FWUP_OK);
+    CHECK(!memcmp(g_slots[FW_SLOT_STAGING], g_img, n));
+    fwup_init(&u, g_pk, V2);
+    CHECK(download(&u, n) == FWUP_E_OLD);                /* same version: refused */
+    fwup_init(&u, g_pk, 0x000300);
+    CHECK(download(&u, n) == FWUP_E_OLD);                /* downgrade: refused */
+    fwup_init(&u, g_pk_other, V1);
+    CHECK(download(&u, n) == FWUP_E_IMAGE && u.image_err == FWIMG_E_SIG);   /* not our key */
+    fwup_init(&u, g_pk, V1);
+    CHECK(fwup_write(&u, 0, g_img, 64) == FWUP_E_HEADER);
+    CHECK(fwup_write(&u, 4096, g_img + 4096, 4096) == FWUP_E_ORDER);      /* no transfer */
+    CHECK(fwup_write(&u, 0, g_img, 4096) == FWUP_OK);
+    CHECK(fwup_write(&u, 8192, g_img + 8192, 4096) == FWUP_E_ORDER);      /* gap */
+    CHECK(fwup_write(&u, 0, g_img, 4096) == FWUP_OK);                     /* restart */
+    CHECK(fwup_write(&u, 4096, g_img + 4096, 4096) == FWUP_OK);
+    CHECK(fwup_finish(&u) == FWUP_E_SIZE);                                /* incomplete */
+    fwup_init(&u, g_pk, V1);
+    CHECK(fwup_write(&u, 0, g_img, 4096) == FWUP_OK);
+    CHECK(fwup_write(&u, 4096, g_img, sizeof g_img - 4096) == FWUP_E_SIZE);   /* past the end */
+    g_img[n - 5] ^= 0x40;                                                 /* corrupted in transit */
+    fwup_init(&u, g_pk, V1);
+    CHECK(download(&u, n) == FWUP_E_VERIFY && u.image_err == FWIMG_E_HASH);
+    g_img[n - 5] ^= 0x40;
+    fwup_init(&u, g_pk, V1);
+    g_sim.slot_ops_left = 3;                                              /* flash fails */
+    CHECK(download(&u, n) == FWUP_E_FLASH);
+    g_sim.slot_ops_left = -1;
+
+    /* ---- bootloader install ---- */
+    fresh();
+    CHECK(fwboot_run(g_pk, &info) == FWBOOT_NO_IMAGE);
+    CHECK(fw_running_version(g_pk) == 0);
+    n = make_image(V1, 10000, L, g_sk);
+    put_slot(FW_SLOT_ACTIVE, n);
+    CHECK(fwboot_run(g_pk, &info) == FWBOOT_RUN && info.version == V1);
+    CHECK(fw_running_version(g_pk) == V1);
+    uint32_t n2 = make_image(V2, 30000, L, g_sk);
+    put_slot(FW_SLOT_STAGING, n2);
+    CHECK(fwboot_run(g_pk, &info) == FWBOOT_INSTALLED && info.version == V2);
+    CHECK(!memcmp(g_slots[FW_SLOT_ACTIVE], g_img, n2));
+    int programs = g_sim.slot_programs;
+    CHECK(fwboot_run(g_pk, &info) == FWBOOT_RUN && info.version == V2);   /* nothing more to do */
+    CHECK(g_sim.slot_programs == programs);
+
+    /* older image staged (cannot come over DFU, but never installs either) */
+    make_image(V1, 10000, L, g_sk);
+    put_slot(FW_SLOT_STAGING, n);
+    CHECK(fwboot_run(g_pk, &info) == FWBOOT_RUN && info.version == V2);
+
+    /* power cut in the middle of the copy, then the next boots */
+    fresh();
+    make_image(V1, 10000, L, g_sk);
+    put_slot(FW_SLOT_ACTIVE, n);
+    n2 = make_image(V2, 30000, L, g_sk);
+    put_slot(FW_SLOT_STAGING, n2);
+    g_sim.slot_ops_left = 7;
+    CHECK(fwboot_run(g_pk, &info) == FWBOOT_FAILED);
+    g_sim.slot_ops_left = -1;                                             /* power back */
+    CHECK(fwimg_verify(g_slots[FW_SLOT_ACTIVE], FW_SLOT_SIZE, L, g_pk, NULL) != FWIMG_OK);
+    CHECK(fwboot_run(g_pk, &info) == FWBOOT_INSTALLED && info.version == V2);
+    CHECK(fwboot_run(g_pk, &info) == FWBOOT_RUN && info.version == V2);
+
+    /* every cut point of a full install recovers */
+    int all_ok = 1;
+    for (int cut = 0; cut < 20; cut++) {
+        fresh();
+        make_image(V1, 10000, L, g_sk);
+        put_slot(FW_SLOT_ACTIVE, n);
+        make_image(V2, 30000, L, g_sk);
+        put_slot(FW_SLOT_STAGING, n2);
+        g_sim.slot_ops_left = cut;
+        fwboot_run(g_pk, &info);
+        g_sim.slot_ops_left = -1;
+        all_ok &= fwboot_run(g_pk, &info) != FWBOOT_NO_IMAGE && info.version == V2 &&
+                  fwboot_run(g_pk, &info) == FWBOOT_RUN && info.version == V2;
+    }
+    CHECK(all_ok);
+
+    /* staged image signed with another key never installs */
+    fresh();
+    make_image(V1, 10000, L, g_sk);
+    put_slot(FW_SLOT_ACTIVE, n);
+    make_image(V2, 30000, L, g_sk_other);
+    put_slot(FW_SLOT_STAGING, n2);
+    CHECK(fwboot_run(g_pk, &info) == FWBOOT_RUN && info.version == V1);
+}
+
 int main(void)
 {
     test_util();
@@ -425,6 +599,7 @@ int main(void)
     test_mgmt();
     test_ncm();
     test_nline();
+    test_fwimage();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

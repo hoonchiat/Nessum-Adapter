@@ -29,10 +29,15 @@
 #define BOARD_NESSUM_RST_GPIO GPIO1
 #define BOARD_NESSUM_RST_PIN 18u    /* TBD: PCB */
 
-/* QSPI NOR: the sealed key blob has the last 4 KB sector to itself (outside the
- * image; the update tool never writes it). Assumes an 8 MB part. */
+/* QSPI NOR map (assumes an 8 MB part; see platform.h "Firmware slots"):
+ *   0x000000  bootloader, 64 KB (FCB + IVT + boot code)       - firmware/boot
+ *   0x010000  active slot, 1 MB (signed image; runs in place) - the application
+ *   0x110000  staging slot, 1 MB (USB DFU writes here)
+ *   last 4 KB sealed network-key blob (never touched by updates) */
 #define BOARD_FLEXSPI_INSTANCE 0u
 #define BOARD_FLASH_SIZE (8u * 1024u * 1024u)
+#define BOARD_FW_ACTIVE_OFFSET 0x010000u
+#define BOARD_FW_STAGING_OFFSET 0x110000u
 #define BOARD_KEYBLOB_OFFSET (BOARD_FLASH_SIZE - 4096u)
 #define BOARD_FLEXSPI_AMBA_BASE 0x60000000u
 

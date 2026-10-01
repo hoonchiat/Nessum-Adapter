@@ -24,11 +24,15 @@ typedef struct {
     bool fail_keyblob_writes;
     bool nessum_down;
     int reenumerate_requests;
+    int slot_ops_left;         /* >= 0: flash erase/program ops until a simulated power cut */
+    int slot_programs;         /* program calls so far (statistics for tests) */
     char serial[40];
     char state_dir[512];       /* "" = no persistence */
 } hostsim_t;
 
 extern hostsim_t g_sim;
+/* Firmware slots (not persisted; fwsim does not do DFU). Erased = 0xFF. */
+extern uint8_t g_slots[2][FW_SLOT_SIZE];
 
 /* Fresh blank device: EEPROM all 0xFF with the given EUI-48 at 0xFA. */
 void hostsim_reset(const uint8_t default_mac[6], const char *serial);

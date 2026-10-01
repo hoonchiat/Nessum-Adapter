@@ -7,6 +7,7 @@
 #include "util.h"
 
 hostsim_t g_sim;
+uint8_t g_slots[2][FW_SLOT_SIZE];
 
 void hostsim_reset(const uint8_t default_mac[6], const char *serial)
 {
@@ -17,6 +18,8 @@ void hostsim_reset(const uint8_t default_mac[6], const char *serial)
     memset(g_sim.eeprom, 0xFF, sizeof g_sim.eeprom);
     memcpy(&g_sim.eeprom[EEPROM_EUI48_ADDR], default_mac, 6);
     snprintf(g_sim.serial, sizeof g_sim.serial, "%s", serial);
+    g_sim.slot_ops_left = -1;
+    memset(g_slots, 0xFF, sizeof g_slots);
 }
 
 static bool path_in_state(char *out, size_t n, const char *name)
@@ -170,3 +173,40 @@ const char *plat_nessum_version(void) { return "sim"; }
 const char *plat_serial(void) { return g_sim.serial; }
 const char *plat_hw_rev(void) { return "SIM"; }
 void plat_request_reenumerate(void) { g_sim.reenumerate_requests++; }
+
+/* ---- firmware slots: NOR semantics (erase -> 0xFF, program only clears bits) ---- */
+static bool slot_op_allowed(void)
+{
+    if (g_sim.slot_ops_left == 0)
+        return false;   /* "power is off": every later operation fails */
+    if (g_sim.slot_ops_left > 0)
+        g_sim.slot_ops_left--;
+    return true;
+}
+
+const uint8_t *plat_slot_map(fw_slot_t slot) { return g_slots[slot]; }
+
+bool plat_slot_erase(fw_slot_t slot, uint32_t off)
+{
+    if (off % FW_SECTOR_SIZE || off >= FW_SLOT_SIZE || !slot_op_allowed())
+        return false;
+    memset(&g_slots[slot][off], 0xFF, FW_SECTOR_SIZE);
+    return true;
+}
+
+bool plat_slot_program(fw_slot_t slot, uint32_t off, const uint8_t *data, uint32_t len)
+{
+    if (off % FW_PAGE_SIZE || len > FW_SECTOR_SIZE || off + len > FW_SLOT_SIZE)
+        return false;
+    g_sim.slot_programs++;
+    if (!slot_op_allowed()) {
+        /* a cut mid-program leaves half the data written */
+        for (uint32_t i = 0; i < len / 2; i++)
+            g_slots[slot][off + i] &= data[i];
+        return false;
+    }
+    for (uint32_t i = 0; i < len; i++)
+        g_slots[slot][off + i] &= data[i];
+    return true;
+}
+
